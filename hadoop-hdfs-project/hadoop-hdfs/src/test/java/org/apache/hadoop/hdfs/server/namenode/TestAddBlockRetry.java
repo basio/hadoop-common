@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
 
@@ -38,6 +39,7 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.net.Node;
@@ -98,13 +100,13 @@ public class TestAddBlockRetry {
     bmField.setAccessible(true);
     bmField.set(ns, spyBM);
 
-    doAnswer(new Answer<DatanodeDescriptor[]>() {
+    doAnswer(new Answer<DatanodeStorageInfo[]>() {
       @Override
-      public DatanodeDescriptor[] answer(InvocationOnMock invocation)
+      public DatanodeStorageInfo[] answer(InvocationOnMock invocation)
           throws Throwable {
         LOG.info("chooseTarget for " + src);
-        DatanodeDescriptor[] ret =
-            (DatanodeDescriptor[]) invocation.callRealMethod();
+        DatanodeStorageInfo[] ret =
+            (DatanodeStorageInfo[]) invocation.callRealMethod();
         count++;
         if(count == 1) { // run second addBlock()
           LOG.info("Starting second addBlock for " + src);
@@ -138,5 +140,34 @@ public class TestAddBlockRetry {
     lb1 = lbs.get(0);
     assertEquals("Wrong replication", REPLICATION, lb1.getLocations().length);
     assertEquals("Blocks are not equal", lb1.getBlock(), lb2.getBlock());
+  }
+
+  /*
+   * Since NameNode will not persist any locations of the block, addBlock()
+   * retry call after restart NN should re-select the locations and return to
+   * client. refer HDFS-5257
+   */
+  @Test
+  public void testAddBlockRetryShouldReturnBlockWithLocations()
+      throws Exception {
+    final String src = "/testAddBlockRetryShouldReturnBlockWithLocations";
+    NamenodeProtocols nameNodeRpc = cluster.getNameNodeRpc();
+    // create file
+    nameNodeRpc.create(src, FsPermission.getFileDefault(), "clientName",
+        new EnumSetWritable<CreateFlag>(EnumSet.of(CreateFlag.CREATE)), true,
+        (short) 3, 1024);
+    // start first addBlock()
+    LOG.info("Starting first addBlock for " + src);
+    LocatedBlock lb1 = nameNodeRpc.addBlock(src, "clientName", null, null,
+        INodeId.GRANDFATHER_INODE_ID, null);
+    assertTrue("Block locations should be present",
+        lb1.getLocations().length > 0);
+
+    cluster.restartNameNode();
+    nameNodeRpc = cluster.getNameNodeRpc();
+    LocatedBlock lb2 = nameNodeRpc.addBlock(src, "clientName", null, null,
+        INodeId.GRANDFATHER_INODE_ID, null);
+    assertEquals("Blocks are not equal", lb1.getBlock(), lb2.getBlock());
+    assertTrue("Wrong locations with retry", lb2.getLocations().length > 0);
   }
 }

@@ -31,12 +31,12 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -46,7 +46,6 @@ import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.LocalContainerLauncher;
 import org.apache.hadoop.mapred.TaskAttemptListenerImpl;
 import org.apache.hadoop.mapred.TaskUmbilicalProtocol;
-import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.OutputCommitter;
 import org.apache.hadoop.mapreduce.OutputFormat;
@@ -69,6 +68,8 @@ import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
+import org.apache.hadoop.mapreduce.v2.api.records.JobReport;
+import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
@@ -104,10 +105,10 @@ import org.apache.hadoop.mapreduce.v2.app.rm.RMHeartbeatHandler;
 import org.apache.hadoop.mapreduce.v2.app.speculate.DefaultSpeculator;
 import org.apache.hadoop.mapreduce.v2.app.speculate.Speculator;
 import org.apache.hadoop.mapreduce.v2.app.speculate.SpeculatorEvent;
-import org.apache.hadoop.mapreduce.v2.app.webapp.WebAppUtil;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JobHistoryUtils;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -201,13 +202,18 @@ public class MRAppMaster extends CompositeService {
   private Credentials jobCredentials = new Credentials(); // Filled during init
   protected UserGroupInformation currentUser; // Will be setup during init
 
-  private volatile boolean isLastAMRetry = false;
+  @VisibleForTesting
+  protected volatile boolean isLastAMRetry = false;
   //Something happened and we should shut down right after we start up.
   boolean errorHappenedShutDown = false;
   private String shutDownMessage = null;
   JobStateInternal forcedState = null;
 
   private long recoveredJobStartTime = 0;
+
+  @VisibleForTesting
+  protected AtomicBoolean successfullyUnregistered =
+      new AtomicBoolean(false);
 
   public MRAppMaster(ApplicationAttemptId applicationAttemptId,
       ContainerId containerId, String nmHost, int nmPort, int nmHttpPort,
@@ -239,13 +245,13 @@ public class MRAppMaster extends CompositeService {
 
     initJobCredentialsAndUGI(conf);
 
-    isLastAMRetry = appAttemptID.getAttemptId() >= maxAppAttempts;
+    context = new RunningAppContext(conf);
+
+    ((RunningAppContext)context).computeIsLastAMRetry();
     LOG.info("The specific max attempts: " + maxAppAttempts +
         " for application: " + appAttemptID.getApplicationId().getId() +
         ". Attempt num: " + appAttemptID.getAttemptId() +
         " is last retry: " + isLastAMRetry);
-
-    context = new RunningAppContext(conf);
 
     // Job name is the same as the app name util we support DAG of jobs
     // for an app later
@@ -526,19 +532,6 @@ public class MRAppMaster extends CompositeService {
     // this is the only job, so shut down the Appmaster
     // note in a workflow scenario, this may lead to creation of a new
     // job (FIXME?)
-    // Send job-end notification
-    if (getConfig().get(MRJobConfig.MR_JOB_END_NOTIFICATION_URL) != null) {
-      try {
-        LOG.info("Job end notification started for jobID : "
-            + job.getReport().getJobId());
-        JobEndNotifier notifier = new JobEndNotifier();
-        notifier.setConf(getConfig());
-        notifier.notify(job.getReport());
-      } catch (InterruptedException ie) {
-        LOG.warn("Job end notification interrupted for jobID : "
-            + job.getReport().getJobId(), ie);
-      }
-    }
 
     try {
       //if isLastAMRetry comes as true, should never set it to false
@@ -554,8 +547,30 @@ public class MRAppMaster extends CompositeService {
       LOG.info("Calling stop for all the services");
       MRAppMaster.this.stop();
 
-      // TODO: Stop ClientService last, since only ClientService should wait for
-      // some time so clients can know the final states. Will be removed once RM come on.
+      if (isLastAMRetry) {
+        // Send job-end notification when it is safe to report termination to
+        // users and it is the last AM retry
+        if (getConfig().get(MRJobConfig.MR_JOB_END_NOTIFICATION_URL) != null) {
+          try {
+            LOG.info("Job end notification started for jobID : "
+                + job.getReport().getJobId());
+            JobEndNotifier notifier = new JobEndNotifier();
+            notifier.setConf(getConfig());
+            JobReport report = job.getReport();
+            // If unregistration fails, the final state is unavailable. However,
+            // at the last AM Retry, the client will finally be notified FAILED
+            // from RM, so we should let users know FAILED via notifier as well
+            if (!context.hasSuccessfullyUnregistered()) {
+              report.setJobState(JobState.FAILED);
+            }
+            notifier.notify(report);
+          } catch (InterruptedException ie) {
+            LOG.warn("Job end notification interrupted for jobID : "
+                + job.getReport().getJobId(), ie);
+          }
+        }
+      }
+
       try {
         Thread.sleep(5000);
       } catch (InterruptedException e) {
@@ -887,7 +902,7 @@ public class MRAppMaster extends CompositeService {
     }
   }
 
-  private class RunningAppContext implements AppContext {
+  public class RunningAppContext implements AppContext {
 
     private final Map<JobId, Job> jobs = new ConcurrentHashMap<JobId, Job>();
     private final Configuration conf;
@@ -963,6 +978,19 @@ public class MRAppMaster extends CompositeService {
     @Override
     public boolean isLastAMRetry(){
       return isLastAMRetry;
+    }
+
+    @Override
+    public boolean hasSuccessfullyUnregistered() {
+      return successfullyUnregistered.get();
+    }
+
+    public void markSuccessfulUnregistration() {
+      successfullyUnregistered.set(true);
+    }
+
+    public void computeIsLastAMRetry() {
+      isLastAMRetry = appAttemptID.getAttemptId() >= maxAppAttempts;
     }
   }
 
@@ -1332,12 +1360,8 @@ public class MRAppMaster extends CompositeService {
       // to gain access to keystore file for opening SSL listener. We can trust
       // RM/NM to issue SSL certificates but definitely not MR-AM as it is
       // running in user-land.
-      HttpConfig.setSecure(conf.getBoolean(MRConfig.SSL_ENABLED_KEY,
-          MRConfig.SSL_ENABLED_KEY_DEFAULT));
-      WebAppUtil.setSSLEnabledInYARN(conf.getBoolean(
-          CommonConfigurationKeysPublic.HADOOP_SSL_ENABLED_KEY,
-          CommonConfigurationKeysPublic.HADOOP_SSL_ENABLED_DEFAULT));
-
+      MRWebAppUtil.initialize(conf);
+      HttpConfig.setPolicy(HttpConfig.Policy.HTTP_ONLY);
       // log the system properties
       String systemPropsToLog = MRApps.getSystemPropertiesToLog(conf);
       if (systemPropsToLog != null) {

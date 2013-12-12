@@ -20,15 +20,21 @@ package org.apache.hadoop.yarn.conf;
 
 import junit.framework.Assert;
 
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 import org.junit.Test;
+
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class TestYarnConfiguration {
 
   @Test
   public void testDefaultRMWebUrl() throws Exception {
     YarnConfiguration conf = new YarnConfiguration();
-    String rmWebUrl = YarnConfiguration.getRMWebAppURL(conf);
+    String rmWebUrl = WebAppUtils.getRMWebAppURLWithScheme(conf);
     // shouldn't have a "/" on the end of the url as all the other uri routinnes
     // specifically add slashes and Jetty doesn't handle double slashes.
     Assert.assertNotSame("RM Web Url is not correct", "http://0.0.0.0:8088",
@@ -43,7 +49,7 @@ public class TestYarnConfiguration {
     // for host and use the port from the RM_WEBAPP_ADDRESS
     conf.set(YarnConfiguration.RM_WEBAPP_ADDRESS, "fortesting:24543");
     conf.set(YarnConfiguration.RM_ADDRESS, "rmtesting:9999");
-    String rmWebUrl = YarnConfiguration.getRMWebAppURL(conf);
+    String rmWebUrl = WebAppUtils.getRMWebAppURLWithScheme(conf);
     String[] parts = rmWebUrl.split(":");
     Assert.assertEquals("RM Web URL Port is incrrect", 24543,
         Integer.valueOf(parts[parts.length - 1]).intValue());
@@ -52,4 +58,21 @@ public class TestYarnConfiguration {
         "http://rmtesting:24543", rmWebUrl);
   }
 
+  @Test
+  public void testGetSocketAddressForNMWithHA() {
+    YarnConfiguration conf = new YarnConfiguration();
+
+    // Set NM address
+    conf.set(YarnConfiguration.NM_ADDRESS, "0.0.0.0:1234");
+
+    // Set HA
+    conf.setBoolean(YarnConfiguration.RM_HA_ENABLED, true);
+    conf.set(YarnConfiguration.RM_HA_ID, "rm1");
+    assertTrue(HAUtil.isHAEnabled(conf));
+
+    InetSocketAddress addr = conf.getSocketAddr(YarnConfiguration.NM_ADDRESS,
+        YarnConfiguration.DEFAULT_NM_ADDRESS,
+        YarnConfiguration.DEFAULT_NM_PORT);
+    assertEquals(1234, addr.getPort());
+  }
 }

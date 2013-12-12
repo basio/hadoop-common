@@ -18,15 +18,20 @@
 package org.apache.hadoop.security;
 
 import java.io.IOException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 
 import org.apache.commons.logging.Log;
@@ -49,7 +54,10 @@ public class Groups {
   
   private final Map<String, CachedGroups> userToGroupsMap = 
     new ConcurrentHashMap<String, CachedGroups>();
+  private final Map<String, List<String>> staticUserToGroupsMap = 
+      new HashMap<String, List<String>>();
   private final long cacheTimeout;
+  private final long warningDeltaMs;
 
   public Groups(Configuration conf) {
     impl = 
@@ -60,11 +68,47 @@ public class Groups {
           conf);
     
     cacheTimeout = 
-      conf.getLong(CommonConfigurationKeys.HADOOP_SECURITY_GROUPS_CACHE_SECS, 5*60) * 1000;
-    
+      conf.getLong(CommonConfigurationKeys.HADOOP_SECURITY_GROUPS_CACHE_SECS, 
+          CommonConfigurationKeys.HADOOP_SECURITY_GROUPS_CACHE_SECS_DEFAULT) * 1000;
+    warningDeltaMs =
+      conf.getLong(CommonConfigurationKeys.HADOOP_SECURITY_GROUPS_CACHE_WARN_AFTER_MS,
+        CommonConfigurationKeys.HADOOP_SECURITY_GROUPS_CACHE_WARN_AFTER_MS_DEFAULT);
+    parseStaticMapping(conf);
+
     if(LOG.isDebugEnabled())
       LOG.debug("Group mapping impl=" + impl.getClass().getName() + 
-          "; cacheTimeout=" + cacheTimeout);
+          "; cacheTimeout=" + cacheTimeout + "; warningDeltaMs=" +
+          warningDeltaMs);
+  }
+
+  /*
+   * Parse the hadoop.user.group.static.mapping.overrides configuration to
+   * staticUserToGroupsMap
+   */
+  private void parseStaticMapping(Configuration conf) {
+    String staticMapping = conf.get(
+        CommonConfigurationKeys.HADOOP_USER_GROUP_STATIC_OVERRIDES,
+        CommonConfigurationKeys.HADOOP_USER_GROUP_STATIC_OVERRIDES_DEFAULT);
+    Collection<String> mappings = StringUtils.getStringCollection(
+        staticMapping, ";");
+    for (String users : mappings) {
+      Collection<String> userToGroups = StringUtils.getStringCollection(users,
+          "=");
+      if (userToGroups.size() < 1 || userToGroups.size() > 2) {
+        throw new HadoopIllegalArgumentException("Configuration "
+            + CommonConfigurationKeys.HADOOP_USER_GROUP_STATIC_OVERRIDES
+            + " is invalid");
+      }
+      String[] userToGroupsArray = userToGroups.toArray(new String[userToGroups
+          .size()]);
+      String user = userToGroupsArray[0];
+      List<String> groups = Collections.emptyList();
+      if (userToGroupsArray.length == 2) {
+        groups = (List<String>) StringUtils
+            .getStringCollection(userToGroupsArray[1]);
+      }
+      staticUserToGroupsMap.put(user, groups);
+    }
   }
   
   /**
@@ -74,19 +118,31 @@ public class Groups {
    * @throws IOException
    */
   public List<String> getGroups(String user) throws IOException {
+    // No need to lookup for groups of static users
+    List<String> staticMapping = staticUserToGroupsMap.get(user);
+    if (staticMapping != null) {
+      return staticMapping;
+    }
     // Return cached value if available
     CachedGroups groups = userToGroupsMap.get(user);
-    long now = Time.now();
+    long startMs = Time.monotonicNow();
     // if cache has a value and it hasn't expired
-    if (groups != null && (groups.getTimestamp() + cacheTimeout > now)) {
+    if (groups != null && (groups.getTimestamp() + cacheTimeout > startMs)) {
       if(LOG.isDebugEnabled()) {
         LOG.debug("Returning cached groups for '" + user + "'");
       }
       return groups.getGroups();
     }
-    
+
     // Create and cache user's groups
-    groups = new CachedGroups(impl.getGroups(user));
+    List<String> groupList = impl.getGroups(user);
+    long endMs = Time.monotonicNow();
+    long deltaMs = endMs - startMs ;
+    if (deltaMs > warningDeltaMs) {
+      LOG.warn("Potential performance problem: getGroups(user=" + user +") " +
+          "took " + deltaMs + " milliseconds.");
+    }
+    groups = new CachedGroups(groupList, endMs);
     if (groups.getGroups().isEmpty()) {
       throw new IOException("No groups found for user " + user);
     }
@@ -133,9 +189,9 @@ public class Groups {
     /**
      * Create and initialize group cache
      */
-    CachedGroups(List<String> groups) {
+    CachedGroups(List<String> groups, long timestamp) {
       this.groups = groups;
-      this.timestamp = Time.now();
+      this.timestamp = timestamp;
     }
 
     /**

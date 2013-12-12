@@ -213,7 +213,8 @@ public class DefaultContainerExecutor extends ContainerExecutor {
         LOG.warn("Exception from container-launch with container ID: "
             + containerId + " and exit code: " + exitCode , e);
         logOutput(shExec.getOutput());
-        String diagnostics = "Exception from container-launch: \n"
+        String diagnostics = "Exception from container-launch: "
+            + e + "\n"
             + StringUtils.stringifyException(e) + "\n" + shExec.getOutput();
         container.handle(new ContainerDiagnosticsUpdateEvent(containerId,
             diagnostics));
@@ -277,7 +278,7 @@ public class DefaultContainerExecutor extends ContainerExecutor {
       pout.println("echo $$ > " + pidFile.toString() + ".tmp");
       pout.println("/bin/mv -f " + pidFile.toString() + ".tmp " + pidFile);
       String exec = Shell.isSetsidAvailable? "exec setsid" : "exec";
-      pout.println(exec + " /bin/bash -c \"" +
+      pout.println(exec + " /bin/bash \"" +
         launchDst.toUri().getPath().toString() + "\"");
     }
   }

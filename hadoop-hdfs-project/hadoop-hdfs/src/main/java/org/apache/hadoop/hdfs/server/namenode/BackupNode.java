@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
+import java.net.URL;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
@@ -79,7 +80,7 @@ public class BackupNode extends NameNode {
   /** Name-node RPC address */
   String nnRpcAddress;
   /** Name-node HTTP address */
-  String nnHttpAddress;
+  URL nnHttpAddress;
   /** Checkpoint manager */
   Checkpointer checkpointManager;
   
@@ -123,11 +124,6 @@ public class BackupNode extends NameNode {
     String addr = conf.get(BN_HTTP_ADDRESS_NAME_KEY, BN_HTTP_ADDRESS_DEFAULT);
     return NetUtils.createSocketAddr(addr);
   }
-  
-  @Override // NameNode
-  protected void setHttpServerAddress(Configuration conf){
-    conf.set(BN_HTTP_ADDRESS_NAME_KEY, NetUtils.getHostPortString(getHttpAddress()));
-  }
 
   @Override // NameNode
   protected void loadNamesystem(Configuration conf) throws IOException {
@@ -164,6 +160,10 @@ public class BackupNode extends NameNode {
     registerWith(nsInfo);
     // Checkpoint daemon should start after the rpc server started
     runCheckpointDaemon(conf);
+    InetSocketAddress addr = getHttpAddress();
+    if (addr != null) {
+      conf.set(BN_HTTP_ADDRESS_NAME_KEY, NetUtils.getHostPortString(getHttpAddress()));
+    }
   }
 
   @Override
@@ -314,7 +314,8 @@ public class BackupNode extends NameNode {
         NamenodeProtocol.class, UserGroupInformation.getCurrentUser(),
         true).getProxy();
     this.nnRpcAddress = NetUtils.getHostPortString(nnAddress);
-    this.nnHttpAddress = NetUtils.getHostPortString(super.getHttpServerAddress(conf));
+    this.nnHttpAddress = DFSUtil.getInfoServer(nnAddress, conf,
+        DFSUtil.getHttpClientScheme(conf)).toURL();
     // get version and id info from the name-node
     NamespaceInfo nsInfo = null;
     while(!isStopRequested()) {

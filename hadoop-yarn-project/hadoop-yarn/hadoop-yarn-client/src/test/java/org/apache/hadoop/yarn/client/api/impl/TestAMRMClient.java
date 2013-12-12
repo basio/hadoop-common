@@ -107,6 +107,7 @@ public class TestAMRMClient {
     // start minicluster
     conf = new YarnConfiguration();
     conf.setInt(YarnConfiguration.RM_NM_HEARTBEAT_INTERVAL_MS, 100);
+    conf.setLong(YarnConfiguration.NM_LOG_RETAIN_SECONDS, 1);
     yarnCluster = new MiniYARNCluster(TestAMRMClient.class.getName(), nodeCount, 1, 1);
     yarnCluster.init(conf);
     yarnCluster.start();
@@ -247,7 +248,7 @@ public class TestAMRMClient {
       matches = amClient.getMatchingRequests(priority, node, testCapability1);
       verifyMatches(matches, 1);
       storedRequest = matches.get(0).iterator().next();
-      assertTrue(storedContainer1 == storedRequest);
+      assertEquals(storedContainer1, storedRequest);
       amClient.removeContainerRequest(storedContainer1);
       
       // exact matching with order maintained
@@ -258,9 +259,9 @@ public class TestAMRMClient {
       int i = 0;
       for(ContainerRequest storedRequest1 : matches.get(0)) {
         if(i++ == 0) {
-          assertTrue(storedContainer4 == storedRequest1);
+          assertEquals(storedContainer4, storedRequest1);
         } else {
-          assertTrue(storedContainer6 == storedRequest1);
+          assertEquals(storedContainer6, storedRequest1);
         }
       }
       amClient.removeContainerRequest(storedContainer6);
@@ -275,7 +276,7 @@ public class TestAMRMClient {
       assert(matches.size() == 2);
       // verify non-fitting containers are not returned and fitting ones are
       for(Collection<ContainerRequest> testSet : matches) {
-        assertTrue(testSet.size() == 1);
+        assertEquals(1, testSet.size());
         ContainerRequest testRequest = testSet.iterator().next();
         assertTrue(testRequest != storedContainer4);
         assertTrue(testRequest != storedContainer5);
@@ -309,8 +310,8 @@ public class TestAMRMClient {
   private void verifyMatches(
                   List<? extends Collection<ContainerRequest>> matches,
                   int matchSize) {
-    assertTrue(matches.size() == 1);
-    assertTrue(matches.get(0).size() == matchSize);    
+    assertEquals(1, matches.size());
+    assertEquals(matches.get(0).size(), matchSize);
   }
   
   @Test (timeout=60000)
@@ -336,12 +337,12 @@ public class TestAMRMClient {
       matches = amClient.getMatchingRequests(priority, node, capability);
       verifyMatches(matches, 1);
       storedRequest = matches.get(0).iterator().next();
-      assertTrue(storedContainer1 == storedRequest);
+      assertEquals(storedContainer1, storedRequest);
       // inferred match rack
       matches = amClient.getMatchingRequests(priority, rack, capability);
       verifyMatches(matches, 1);
       storedRequest = matches.get(0).iterator().next();
-      assertTrue(storedContainer1 == storedRequest);
+      assertEquals(storedContainer1, storedRequest);
       
       // inferred rack match no longer valid after request is removed
       amClient.removeContainerRequest(storedContainer1);
@@ -386,10 +387,10 @@ public class TestAMRMClient {
       // test addition and storage
       int containersRequestedAny = amClient.remoteRequestsTable.get(priority)
        .get(ResourceRequest.ANY).get(capability).remoteRequest.getNumContainers();
-      assertTrue(containersRequestedAny == 2);
+      assertEquals(2, containersRequestedAny);
       containersRequestedAny = amClient.remoteRequestsTable.get(priority1)
           .get(ResourceRequest.ANY).get(capability).remoteRequest.getNumContainers();
-         assertTrue(containersRequestedAny == 1);
+         assertEquals(1, containersRequestedAny);
       List<? extends Collection<ContainerRequest>> matches = 
           amClient.getMatchingRequests(priority, node, capability);
       verifyMatches(matches, 2);
@@ -416,7 +417,7 @@ public class TestAMRMClient {
       
       // test matching of containers
       ContainerRequest storedRequest = matches.get(0).iterator().next();
-      assertTrue(storedContainer1 == storedRequest);
+      assertEquals(storedContainer1, storedRequest);
       amClient.removeContainerRequest(storedContainer1);
       matches = 
           amClient.getMatchingRequests(priority, ResourceRequest.ANY, capability);
@@ -437,10 +438,10 @@ public class TestAMRMClient {
           && iterationsLeft-- > 0) {
         Log.info(" == alloc " + allocatedContainerCount + " it left " + iterationsLeft);
         AllocateResponse allocResponse = amClient.allocate(0.1f);
-        assertTrue(amClient.ask.size() == 0);
-        assertTrue(amClient.release.size() == 0);
+        assertEquals(0, amClient.ask.size());
+        assertEquals(0, amClient.release.size());
         
-        assertTrue(nodeCount == amClient.getClusterNodeCount());
+        assertEquals(nodeCount, amClient.getClusterNodeCount());
         allocatedContainerCount += allocResponse.getAllocatedContainers().size();
         for(Container container : allocResponse.getAllocatedContainers()) {
           ContainerRequest expectedRequest = 
@@ -452,7 +453,7 @@ public class TestAMRMClient {
           // test correct matched container is returned
           verifyMatches(matches, 1);
           ContainerRequest matchedRequest = matches.get(0).iterator().next();
-          assertTrue(matchedRequest == expectedRequest);
+          assertEquals(matchedRequest, expectedRequest);
           amClient.removeContainerRequest(matchedRequest);
           // assign this container, use it and release it
           amClient.releaseAssignedContainer(container.getId());
@@ -463,11 +464,11 @@ public class TestAMRMClient {
         }
       }
       
-      assertTrue(allocatedContainerCount == 2);
+      assertEquals(2, allocatedContainerCount);
       AllocateResponse allocResponse = amClient.allocate(0.1f);
-      assertTrue(amClient.release.size() == 0);
-      assertTrue(amClient.ask.size() == 0);
-      assertTrue(allocResponse.getAllocatedContainers().size() == 0);
+      assertEquals(0, amClient.release.size());
+      assertEquals(0, amClient.ask.size());
+      assertEquals(0, allocResponse.getAllocatedContainers().size());
       // 0 requests left. everything got cleaned up
       assertTrue(amClient.remoteRequestsTable.isEmpty());      
       
@@ -493,14 +494,14 @@ public class TestAMRMClient {
       amClient.start();
       amClient.registerApplicationMaster("Host", 10000, "");
       
-      assertTrue(amClient.ask.size() == 0);
-      assertTrue(amClient.release.size() == 0);
+      assertEquals(0, amClient.ask.size());
+      assertEquals(0, amClient.release.size());
       
       ContainerRequest storedContainer1 = 
           new ContainerRequest(capability, nodes, racks, priority);
       amClient.addContainerRequest(storedContainer1);
-      assertTrue(amClient.ask.size() == 3);
-      assertTrue(amClient.release.size() == 0);
+      assertEquals(3, amClient.ask.size());
+      assertEquals(0, amClient.release.size());
       
       List<String> localNodeBlacklist = new ArrayList<String>();
       localNodeBlacklist.add(node);
@@ -511,7 +512,7 @@ public class TestAMRMClient {
       int allocatedContainerCount = getAllocatedContainersNumber(amClient,
         DEFAULT_ITERATION);
       // the only node is in blacklist, so no allocation
-      assertTrue(allocatedContainerCount == 0);
+      assertEquals(0, allocatedContainerCount);
 
       // Remove node from blacklist, so get assigned with 2
       amClient.updateBlacklist(null, localNodeBlacklist);
@@ -520,7 +521,7 @@ public class TestAMRMClient {
       amClient.addContainerRequest(storedContainer2);
       allocatedContainerCount = getAllocatedContainersNumber(amClient,
           DEFAULT_ITERATION);
-      assertEquals(allocatedContainerCount, 2);
+      assertEquals(2, allocatedContainerCount);
       
       // Test in case exception in allocate(), blacklist is kept
       assertTrue(amClient.blacklistAdditions.isEmpty());
@@ -537,7 +538,7 @@ public class TestAMRMClient {
         amClient.allocate(0.1f);
         fail("there should be an exception here.");
       } catch (Exception e) {
-        assertEquals(amClient.blacklistAdditions.size(), 1);
+        assertEquals(1, amClient.blacklistAdditions.size());
       }
     } finally {
       if (amClient != null && amClient.getServiceState() == STATE.STARTED) {
@@ -564,16 +565,16 @@ public class TestAMRMClient {
       nodeList01.add(nodes[0]);
       nodeList01.add(nodes[1]);
       amClient.updateBlacklist(nodeList01, null);
-      assertEquals(amClient.blacklistAdditions.size(),2);
-      assertEquals(amClient.blacklistRemovals.size(),0);
+      assertEquals(2, amClient.blacklistAdditions.size());
+      assertEquals(0, amClient.blacklistRemovals.size());
       
       // Add nodes[0] again, verify it is not added duplicated.
       List<String> nodeList02 = new ArrayList<String>();
       nodeList02.add(nodes[0]);
       nodeList02.add(nodes[2]);
       amClient.updateBlacklist(nodeList02, null);
-      assertEquals(amClient.blacklistAdditions.size(),3);
-      assertEquals(amClient.blacklistRemovals.size(),0);
+      assertEquals(3, amClient.blacklistAdditions.size());
+      assertEquals(0, amClient.blacklistRemovals.size());
       
       // Add nodes[1] and nodes[2] to removal list, 
       // Verify addition list remove these two nodes.
@@ -581,16 +582,16 @@ public class TestAMRMClient {
       nodeList12.add(nodes[1]);
       nodeList12.add(nodes[2]);
       amClient.updateBlacklist(null, nodeList12);
-      assertEquals(amClient.blacklistAdditions.size(),1);
-      assertEquals(amClient.blacklistRemovals.size(),2);
+      assertEquals(1, amClient.blacklistAdditions.size());
+      assertEquals(2, amClient.blacklistRemovals.size());
       
       // Add nodes[1] again to addition list, 
       // Verify removal list will remove this node.
       List<String> nodeList1 = new ArrayList<String>();
       nodeList1.add(nodes[1]);
       amClient.updateBlacklist(nodeList1, null);
-      assertEquals(amClient.blacklistAdditions.size(),2);
-      assertEquals(amClient.blacklistRemovals.size(),1);
+      assertEquals(2, amClient.blacklistAdditions.size());
+      assertEquals(1, amClient.blacklistRemovals.size());
     } finally {
       if (amClient != null && amClient.getServiceState() == STATE.STARTED) {
         amClient.stop();
@@ -605,10 +606,10 @@ public class TestAMRMClient {
     while (iterationsLeft-- > 0) {
       Log.info(" == alloc " + allocatedContainerCount + " it left " + iterationsLeft);
       AllocateResponse allocResponse = amClient.allocate(0.1f);
-      assertTrue(amClient.ask.size() == 0);
-      assertTrue(amClient.release.size() == 0);
+      assertEquals(0, amClient.ask.size());
+      assertEquals(0, amClient.release.size());
         
-      assertTrue(nodeCount == amClient.getClusterNodeCount());
+      assertEquals(nodeCount, amClient.getClusterNodeCount());
       allocatedContainerCount += allocResponse.getAllocatedContainers().size();
         
       if(allocatedContainerCount == 0) {
@@ -625,6 +626,13 @@ public class TestAMRMClient {
     try {
       // start am rm client
       amClient = AMRMClient.<ContainerRequest>createAMRMClient();
+
+      //setting an instance NMTokenCache
+      amClient.setNMTokenCache(new NMTokenCache());
+      //asserting we are not using the singleton instance cache
+      Assert.assertNotSame(NMTokenCache.getSingleton(), 
+          amClient.getNMTokenCache());
+
       amClient.init(conf);
       amClient.start();
 
@@ -646,8 +654,8 @@ public class TestAMRMClient {
       throws YarnException, IOException {
     // setup container request
     
-    assertTrue(amClient.ask.size() == 0);
-    assertTrue(amClient.release.size() == 0);
+    assertEquals(0, amClient.ask.size());
+    assertEquals(0, amClient.release.size());
     
     amClient.addContainerRequest(
         new ContainerRequest(capability, nodes, racks, priority));
@@ -669,28 +677,28 @@ public class TestAMRMClient {
     int containersRequestedAny = amClient.remoteRequestsTable.get(priority)
     .get(ResourceRequest.ANY).get(capability).remoteRequest.getNumContainers();
 
-    assertTrue(containersRequestedNode == 2);
-    assertTrue(containersRequestedRack == 2);
-    assertTrue(containersRequestedAny == 2);
-    assertTrue(amClient.ask.size() == 3);
-    assertTrue(amClient.release.size() == 0);
+    assertEquals(2, containersRequestedNode);
+    assertEquals(2, containersRequestedRack);
+    assertEquals(2, containersRequestedAny);
+    assertEquals(3, amClient.ask.size());
+    assertEquals(0, amClient.release.size());
 
     // RM should allocate container within 2 calls to allocate()
     int allocatedContainerCount = 0;
     int iterationsLeft = 3;
     Set<ContainerId> releases = new TreeSet<ContainerId>();
     
-    NMTokenCache.clearCache();
-    Assert.assertEquals(0, NMTokenCache.numberOfNMTokensInCache());
+    amClient.getNMTokenCache().clearCache();
+    Assert.assertEquals(0, amClient.getNMTokenCache().numberOfTokensInCache());
     HashMap<String, Token> receivedNMTokens = new HashMap<String, Token>();
     
     while (allocatedContainerCount < containersRequestedAny
         && iterationsLeft-- > 0) {
       AllocateResponse allocResponse = amClient.allocate(0.1f);
-      assertTrue(amClient.ask.size() == 0);
-      assertTrue(amClient.release.size() == 0);
+      assertEquals(0, amClient.ask.size());
+      assertEquals(0, amClient.release.size());
       
-      assertTrue(nodeCount == amClient.getClusterNodeCount());
+      assertEquals(nodeCount, amClient.getClusterNodeCount());
       allocatedContainerCount += allocResponse.getAllocatedContainers().size();
       for(Container container : allocResponse.getAllocatedContainers()) {
         ContainerId rejectContainerId = container.getId();
@@ -716,19 +724,19 @@ public class TestAMRMClient {
     Assert.assertTrue(receivedNMTokens.size() > 0
         && receivedNMTokens.size() <= nodeCount);
     
-    assertTrue(allocatedContainerCount == containersRequestedAny);
-    assertTrue(amClient.release.size() == 2);
-    assertTrue(amClient.ask.size() == 0);
+    assertEquals(allocatedContainerCount, containersRequestedAny);
+    assertEquals(2, amClient.release.size());
+    assertEquals(0, amClient.ask.size());
     
     // need to tell the AMRMClient that we dont need these resources anymore
     amClient.removeContainerRequest(
         new ContainerRequest(capability, nodes, racks, priority));
     amClient.removeContainerRequest(
         new ContainerRequest(capability, nodes, racks, priority));
-    assertTrue(amClient.ask.size() == 3);
+    assertEquals(3, amClient.ask.size());
     // send 0 container count request for resources that are no longer needed
     ResourceRequest snoopRequest = amClient.ask.iterator().next();
-    assertTrue(snoopRequest.getNumContainers() == 0);
+    assertEquals(0, snoopRequest.getNumContainers());
     
     // test RPC exception handling
     amClient.addContainerRequest(new ContainerRequest(capability, nodes,
@@ -736,7 +744,7 @@ public class TestAMRMClient {
     amClient.addContainerRequest(new ContainerRequest(capability, nodes,
         racks, priority));
     snoopRequest = amClient.ask.iterator().next();
-    assertTrue(snoopRequest.getNumContainers() == 2);
+    assertEquals(2, snoopRequest.getNumContainers());
     
     ApplicationMasterProtocol realRM = amClient.rmClient;
     try {
@@ -760,12 +768,12 @@ public class TestAMRMClient {
       amClient.rmClient = realRM;
     }
 
-    assertTrue(amClient.release.size() == 2);
-    assertTrue(amClient.ask.size() == 3);
+    assertEquals(2, amClient.release.size());
+    assertEquals(3, amClient.ask.size());
     snoopRequest = amClient.ask.iterator().next();
     // verify that the remove request made in between makeRequest and allocate 
     // has not been lost
-    assertTrue(snoopRequest.getNumContainers() == 0);
+    assertEquals(0, snoopRequest.getNumContainers());
     
     iterationsLeft = 3;
     // do a few iterations to ensure RM is not going send new containers
@@ -773,13 +781,13 @@ public class TestAMRMClient {
       // inform RM of rejection
       AllocateResponse allocResponse = amClient.allocate(0.1f);
       // RM did not send new containers because AM does not need any
-      assertTrue(allocResponse.getAllocatedContainers().size() == 0);
+      assertEquals(0, allocResponse.getAllocatedContainers().size());
       if(allocResponse.getCompletedContainersStatuses().size() > 0) {
         for(ContainerStatus cStatus :allocResponse
             .getCompletedContainersStatuses()) {
           if(releases.contains(cStatus.getContainerId())) {
-            assertTrue(cStatus.getState() == ContainerState.COMPLETE);
-            assertTrue(cStatus.getExitStatus() == -100);
+            assertEquals(cStatus.getState(), ContainerState.COMPLETE);
+            assertEquals(-100, cStatus.getExitStatus());
             releases.remove(cStatus.getContainerId());
           }
         }
@@ -789,8 +797,8 @@ public class TestAMRMClient {
         sleep(100);
       }
     }
-    assertTrue(amClient.ask.size() == 0);
-    assertTrue(amClient.release.size() == 0);
+    assertEquals(0, amClient.ask.size());
+    assertEquals(0, amClient.release.size());
   }
   
   private void sleep(int sleepTime) {

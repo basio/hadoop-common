@@ -97,7 +97,6 @@ public class TestPersistBlocks {
     conf.setInt(
         CommonConfigurationKeysPublic.IPC_CLIENT_CONNECTION_MAXIDLETIME_KEY,
         0);
-    conf.setBoolean(DFSConfigKeys.DFS_PERSIST_BLOCKS_KEY, true);
     MiniDFSCluster cluster = null;
 
     long len = 0;
@@ -157,7 +156,6 @@ public class TestPersistBlocks {
     conf.setInt(
         CommonConfigurationKeysPublic.IPC_CLIENT_CONNECTION_MAXIDLETIME_KEY,
         0);
-    conf.setBoolean(DFSConfigKeys.DFS_PERSIST_BLOCKS_KEY, true);
     MiniDFSCluster cluster = null;
 
     long len = 0;
@@ -193,7 +191,7 @@ public class TestPersistBlocks {
       // This would mean that blocks were successfully persisted to the log
       FileStatus status = fs.getFileStatus(FILE_PATH);
       assertTrue("Length incorrect: " + status.getLen(),
-          status.getLen() != len - BLOCK_SIZE);
+          status.getLen() == len - BLOCK_SIZE);
 
       // Verify the data showed up from before restart, sans abandoned block.
       FSDataInputStream readStream = fs.open(FILE_PATH);
@@ -219,7 +217,6 @@ public class TestPersistBlocks {
     conf.setInt(
         CommonConfigurationKeysPublic.IPC_CLIENT_CONNECTION_MAXIDLETIME_KEY,
         0);
-    conf.setBoolean(DFSConfigKeys.DFS_PERSIST_BLOCKS_KEY, true);
     MiniDFSCluster cluster = null;
 
     FSDataOutputStream stream;
@@ -269,7 +266,6 @@ public class TestPersistBlocks {
     conf.setInt(
         CommonConfigurationKeysPublic.IPC_CLIENT_CONNECTION_MAXIDLETIME_KEY,
         0);
-    conf.setBoolean(DFSConfigKeys.DFS_PERSIST_BLOCKS_KEY, true);
     MiniDFSCluster cluster = null;
 
     FSDataOutputStream stream;

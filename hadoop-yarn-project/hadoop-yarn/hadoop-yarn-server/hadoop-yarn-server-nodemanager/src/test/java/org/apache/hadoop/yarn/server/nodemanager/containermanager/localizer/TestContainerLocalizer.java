@@ -32,6 +32,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,6 +47,8 @@ import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.AbstractFileSystem;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -77,8 +80,10 @@ import org.mockito.stubbing.Answer;
 
 public class TestContainerLocalizer {
 
+  static final Log LOG = LogFactory.getLog(TestContainerLocalizer.class);
   static final Path basedir =
       new Path("target", TestContainerLocalizer.class.getName());
+  static final FsPermission CACHE_DIR_PERM = new FsPermission((short)0710);
 
   static final String appUser = "yak";
   static final String appId = "app_RM_0";
@@ -94,7 +99,10 @@ public class TestContainerLocalizer {
 
   @Test
   public void testContainerLocalizerMain() throws Exception {
-    ContainerLocalizer localizer = setupContainerLocalizerForTest();
+    FileContext fs = FileContext.getLocalFSFileContext();
+    spylfs = spy(fs.getDefaultFileSystem());
+    ContainerLocalizer localizer =
+        setupContainerLocalizerForTest();
 
     // verify created cache
     List<Path> privCacheList = new ArrayList<Path>();
@@ -164,12 +172,12 @@ public class TestContainerLocalizer {
       Path base = new Path(new Path(p, ContainerLocalizer.USERCACHE), appUser);
       Path privcache = new Path(base, ContainerLocalizer.FILECACHE);
       // $x/usercache/$user/filecache
-      verify(spylfs).mkdir(eq(privcache), isA(FsPermission.class), eq(false));
+      verify(spylfs).mkdir(eq(privcache), eq(CACHE_DIR_PERM), eq(false));
       Path appDir =
         new Path(base, new Path(ContainerLocalizer.APPCACHE, appId));
       // $x/usercache/$user/appcache/$appId/filecache
       Path appcache = new Path(appDir, ContainerLocalizer.FILECACHE);
-      verify(spylfs).mkdir(eq(appcache), isA(FsPermission.class), eq(false));
+      verify(spylfs).mkdir(eq(appcache), eq(CACHE_DIR_PERM), eq(false));
     }
     // verify tokens read at expected location
     verify(spylfs).open(tokenPath);
@@ -190,11 +198,25 @@ public class TestContainerLocalizer {
           }
         }));
   }
+  
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testLocalizerTokenIsGettingRemoved() throws Exception {
+    FileContext fs = FileContext.getLocalFSFileContext();
+    spylfs = spy(fs.getDefaultFileSystem());
+    ContainerLocalizer localizer = setupContainerLocalizerForTest();
+    doNothing().when(localizer).localizeFiles(any(LocalizationProtocol.class),
+        any(CompletionService.class), any(UserGroupInformation.class));
+    localizer.runLocalization(nmAddr);
+    verify(spylfs, times(1)).delete(tokenPath, false);
+  }
 
   @Test
   @SuppressWarnings("unchecked") // mocked generics
   public void testContainerLocalizerClosesFilesystems() throws Exception {
     // verify filesystems are closed when localizer doesn't fail
+    FileContext fs = FileContext.getLocalFSFileContext();
+    spylfs = spy(fs.getDefaultFileSystem());
     ContainerLocalizer localizer = setupContainerLocalizerForTest();
     doNothing().when(localizer).localizeFiles(any(LocalizationProtocol.class),
         any(CompletionService.class), any(UserGroupInformation.class));
@@ -203,6 +225,7 @@ public class TestContainerLocalizer {
     localizer.runLocalization(nmAddr);
     verify(localizer).closeFileSystems(any(UserGroupInformation.class));
 
+    spylfs = spy(fs.getDefaultFileSystem());
     // verify filesystems are closed when localizer fails
     localizer = setupContainerLocalizerForTest();
     doThrow(new YarnRuntimeException("Forced Failure")).when(localizer).localizeFiles(
@@ -217,7 +240,6 @@ public class TestContainerLocalizer {
   @SuppressWarnings("unchecked") // mocked generics
   private ContainerLocalizer setupContainerLocalizerForTest()
       throws Exception {
-    spylfs = spy(FileContext.getLocalFSFileContext().getDefaultFileSystem());
     // don't actually create dirs
     doNothing().when(spylfs).mkdir(
         isA(Path.class), isA(FsPermission.class), anyBoolean());
@@ -245,10 +267,10 @@ public class TestContainerLocalizer {
                 containerId)));
     doReturn(new FSDataInputStream(new FakeFSDataInputStream(appTokens))
         ).when(spylfs).open(tokenPath);
-
     nmProxy = mock(LocalizationProtocol.class);
     doReturn(nmProxy).when(localizer).getProxy(nmAddr);
     doNothing().when(localizer).sleep(anyInt());
+    
 
     // return result instantly for deterministic test
     ExecutorService syncExec = mock(ExecutorService.class);

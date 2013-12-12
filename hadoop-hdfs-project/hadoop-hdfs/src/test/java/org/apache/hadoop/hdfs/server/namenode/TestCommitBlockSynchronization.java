@@ -18,24 +18,22 @@
 
 package org.apache.hadoop.hdfs.server.namenode;
 
-import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
-
-import java.io.IOException;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
-import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.junit.Test;
+
+import java.io.IOException;
+
+import static org.junit.Assert.fail;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Mockito.*;
 
 /**
  * Verify that TestCommitBlockSynchronization is idempotent.
@@ -45,12 +43,11 @@ public class TestCommitBlockSynchronization {
   private static final long length = 200;
   private static final long genStamp = 300;
 
-  private FSNamesystem makeNameSystemSpy(Block block,
-                                         INodeFileUnderConstruction file)
+  private FSNamesystem makeNameSystemSpy(Block block, INodeFile file)
       throws IOException {
     Configuration conf = new Configuration();
     FSImage image = new FSImage(conf);
-    DatanodeDescriptor[] targets = new DatanodeDescriptor[0];
+    final DatanodeStorageInfo[] targets = {};
 
     FSNamesystem namesystem = new FSNamesystem(conf, image);
     FSNamesystem namesystemSpy = spy(namesystem);
@@ -60,21 +57,26 @@ public class TestCommitBlockSynchronization {
     blockInfo.setGenerationStamp(genStamp);
     blockInfo.initializeBlockRecovery(genStamp);
     doReturn(true).when(file).removeLastBlock(any(Block.class));
+    doReturn(true).when(file).isUnderConstruction();
 
     doReturn(blockInfo).when(namesystemSpy).getStoredBlock(any(Block.class));
     doReturn("").when(namesystemSpy).closeFileCommitBlocks(
-        any(INodeFileUnderConstruction.class),
-        any(BlockInfo.class));
+        any(INodeFile.class), any(BlockInfo.class));
     doReturn("").when(namesystemSpy).persistBlocks(
-        any(INodeFileUnderConstruction.class), anyBoolean());
+        any(INodeFile.class), anyBoolean());
     doReturn(mock(FSEditLog.class)).when(namesystemSpy).getEditLog();
 
     return namesystemSpy;
   }
 
+  private INodeFile mockFileUnderConstruction() {
+    INodeFile file = mock(INodeFile.class);
+    return file;
+  }
+
   @Test
   public void testCommitBlockSynchronization() throws IOException {
-    INodeFileUnderConstruction file = mock(INodeFileUnderConstruction.class);
+    INodeFile file = mockFileUnderConstruction();
     Block block = new Block(blockId, length, genStamp);
     FSNamesystem namesystemSpy = makeNameSystemSpy(block, file);
     DatanodeID[] newTargets = new DatanodeID[0];
@@ -102,7 +104,7 @@ public class TestCommitBlockSynchronization {
 
   @Test
   public void testCommitBlockSynchronization2() throws IOException {
-    INodeFileUnderConstruction file = mock(INodeFileUnderConstruction.class);
+    INodeFile file = mockFileUnderConstruction();
     Block block = new Block(blockId, length, genStamp);
     FSNamesystem namesystemSpy = makeNameSystemSpy(block, file);
     DatanodeID[] newTargets = new DatanodeID[0];
@@ -126,7 +128,7 @@ public class TestCommitBlockSynchronization {
 
   @Test
   public void testCommitBlockSynchronizationWithDelete() throws IOException {
-    INodeFileUnderConstruction file = mock(INodeFileUnderConstruction.class);
+    INodeFile file = mockFileUnderConstruction();
     Block block = new Block(blockId, length, genStamp);
     FSNamesystem namesystemSpy = makeNameSystemSpy(block, file);
     DatanodeID[] newTargets = new DatanodeID[0];
@@ -146,7 +148,7 @@ public class TestCommitBlockSynchronization {
 
   @Test
   public void testCommitBlockSynchronizationWithClose() throws IOException {
-    INodeFileUnderConstruction file = mock(INodeFileUnderConstruction.class);
+    INodeFile file = mockFileUnderConstruction();
     Block block = new Block(blockId, length, genStamp);
     FSNamesystem namesystemSpy = makeNameSystemSpy(block, file);
     DatanodeID[] newTargets = new DatanodeID[0];
@@ -173,11 +175,11 @@ public class TestCommitBlockSynchronization {
   @Test
   public void testCommitBlockSynchronizationWithCloseAndNonExistantTarget()
       throws IOException {
-    INodeFileUnderConstruction file = mock(INodeFileUnderConstruction.class);
+    INodeFile file = mockFileUnderConstruction();
     Block block = new Block(blockId, length, genStamp);
     FSNamesystem namesystemSpy = makeNameSystemSpy(block, file);
     DatanodeID[] newTargets = new DatanodeID[]{
-        new DatanodeID("0.0.0.0", "nonexistantHost", "1", 0, 0, 0)};
+        new DatanodeID("0.0.0.0", "nonexistantHost", "1", 0, 0, 0, 0)};
 
     ExtendedBlock lastBlock = new ExtendedBlock();
     namesystemSpy.commitBlockSynchronization(

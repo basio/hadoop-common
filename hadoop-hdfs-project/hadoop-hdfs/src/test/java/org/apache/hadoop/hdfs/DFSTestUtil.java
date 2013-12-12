@@ -18,60 +18,21 @@
 
 package org.apache.hadoop.hdfs;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY;
-import static org.junit.Assert.assertEquals;
-
-import java.io.BufferedOutputStream;
-import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.FileReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.net.URL;
-import java.net.URLConnection;
-import java.security.PrivilegedExceptionAction;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.TimeoutException;
-
+import com.google.common.base.Charsets;
+import com.google.common.base.Joiner;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.BlockLocation;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileContext;
+import org.apache.hadoop.fs.*;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.Options.Rename;
-import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.MiniDFSCluster.NameNodeInfo;
 import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
-import org.apache.hadoop.hdfs.protocol.DatanodeID;
-import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.*;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
-import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.BlockOpResponseProto;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
@@ -79,6 +40,7 @@ import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
@@ -86,6 +48,7 @@ import org.apache.hadoop.hdfs.server.datanode.TestTransferRbw;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.ShellBasedUnixGroupsMapping;
@@ -93,8 +56,15 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.VersionInfo;
 
-import com.google.common.base.Charsets;
-import com.google.common.base.Joiner;
+import java.io.*;
+import java.net.*;
+import java.security.PrivilegedExceptionAction;
+import java.util.*;
+import java.util.concurrent.TimeoutException;
+
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY;
+import static org.junit.Assert.assertEquals;
 
 /** Utilities for HDFS tests */
 public class DFSTestUtil {
@@ -114,10 +84,10 @@ public class DFSTestUtil {
   
   /** Creates a new instance of DFSTestUtil
    *
-   * @param testName Name of the test from where this utility is used
    * @param nFiles Number of files to be created
    * @param maxLevels Maximum number of directory levels
    * @param maxSize Maximum size for file
+   * @param minSize Minimum size for file
    */
   private DFSTestUtil(int nFiles, int maxLevels, int maxSize, int minSize) {
     this.nFiles = nFiles;
@@ -143,7 +113,7 @@ public class DFSTestUtil {
   }
   
   /**
-   * when formating a namenode - we must provide clusterid.
+   * when formatting a namenode - we must provide clusterid.
    * @param conf
    * @throws IOException
    */
@@ -803,9 +773,11 @@ public class DFSTestUtil {
   }
   
   private static DatanodeID getDatanodeID(String ipAddr) {
-    return new DatanodeID(ipAddr, "localhost", "",
+    return new DatanodeID(ipAddr, "localhost",
+        UUID.randomUUID().toString(),
         DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+        DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT);
   }
 
@@ -814,8 +786,9 @@ public class DFSTestUtil {
   }
 
   public static DatanodeID getLocalDatanodeID(int port) {
-    return new DatanodeID("127.0.0.1", "localhost", "",
-        port, port, port);
+    return new DatanodeID("127.0.0.1", "localhost",
+        UUID.randomUUID().toString(),
+        port, port, port, port);
   }
 
   public static DatanodeDescriptor getLocalDatanodeDescriptor() {
@@ -836,8 +809,10 @@ public class DFSTestUtil {
 
   public static DatanodeInfo getDatanodeInfo(String ipAddr, 
       String host, int port) {
-    return new DatanodeInfo(new DatanodeID(ipAddr, host, "",
-        port, DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+    return new DatanodeInfo(new DatanodeID(ipAddr, host,
+        UUID.randomUUID().toString(), port,
+        DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+        DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT));
   }
 
@@ -846,8 +821,9 @@ public class DFSTestUtil {
     return new DatanodeInfo(ipAddr, hostname, "",
         DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+        DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT,
-        1, 2, 3, 4, 5, 6, "local", adminState);
+        1l, 2l, 3l, 4l, 0l, 0l, 5, 6, "local", adminState);
   }
 
   public static DatanodeDescriptor getDatanodeDescriptor(String ipAddr,
@@ -856,10 +832,45 @@ public class DFSTestUtil {
         rackLocation);
   }
 
+  public static DatanodeStorageInfo createDatanodeStorageInfo(
+      String storageID, String ip) {
+    return createDatanodeStorageInfo(storageID, ip, "defaultRack");
+  }
+  public static DatanodeStorageInfo[] createDatanodeStorageInfos(String[] racks) {
+    return createDatanodeStorageInfos(racks.length, racks);
+  }
+  public static DatanodeStorageInfo[] createDatanodeStorageInfos(int n, String... racks) {
+    DatanodeStorageInfo[] storages = new DatanodeStorageInfo[n];
+    for(int i = storages.length; i > 0; ) {
+      final String storageID = "s" + i;
+      final String ip = i + "." + i + "." + i + "." + i;
+      i--;
+      final String rack = i < racks.length? racks[i]: "defaultRack";
+      storages[i] = createDatanodeStorageInfo(storageID, ip, rack);
+    }
+    return storages;
+  }
+  public static DatanodeStorageInfo createDatanodeStorageInfo(
+      String storageID, String ip, String rack) {
+    final DatanodeStorage storage = new DatanodeStorage(storageID);
+    final DatanodeDescriptor dn = BlockManagerTestUtil.getDatanodeDescriptor(ip, rack, storage);
+    return BlockManagerTestUtil.newDatanodeStorageInfo(dn, storage);
+  }
+  public static DatanodeDescriptor[] toDatanodeDescriptor(
+      DatanodeStorageInfo[] storages) {
+    DatanodeDescriptor[] datanodes = new DatanodeDescriptor[storages.length];
+    for(int i = 0; i < datanodes.length; i++) {
+      datanodes[i] = storages[i].getDatanodeDescriptor();
+    }
+    return datanodes;
+  }
+
   public static DatanodeDescriptor getDatanodeDescriptor(String ipAddr,
       int port, String rackLocation) {
-    DatanodeID dnId = new DatanodeID(ipAddr, "host", "", port,
+    DatanodeID dnId = new DatanodeID(ipAddr, "host",
+        UUID.randomUUID().toString(), port,
         DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+        DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
         DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT);
     return new DatanodeDescriptor(dnId, rackLocation);
   }
@@ -1022,5 +1033,30 @@ public class DFSTestUtil {
       locatedBlocks = DFSClientAdapter.callGetBlockLocations(
           cluster.getNameNodeRpc(nnIndex), filePath, 0L, bytes.length);
     } while (locatedBlocks.isUnderConstruction());
+    // OP_ADD_CACHE_POOL
+    filesystem.addCachePool(new CachePoolInfo("pool1"));
+    // OP_MODIFY_CACHE_POOL
+    filesystem.modifyCachePool(new CachePoolInfo("pool1").setWeight(99));
+    // OP_ADD_PATH_BASED_CACHE_DIRECTIVE
+    long id = filesystem.addCacheDirective(
+        new CacheDirectiveInfo.Builder().
+            setPath(new Path("/path")).
+            setReplication((short)1).
+            setPool("pool1").
+            build());
+    // OP_MODIFY_PATH_BASED_CACHE_DIRECTIVE
+    filesystem.modifyCacheDirective(
+        new CacheDirectiveInfo.Builder().
+            setId(id).
+            setReplication((short)2).
+            build());
+    // OP_REMOVE_PATH_BASED_CACHE_DIRECTIVE
+    filesystem.removeCacheDirective(id);
+    // OP_REMOVE_CACHE_POOL
+    filesystem.removeCachePool("pool1");
+  }
+
+  public static void abortStream(DFSOutputStream out) throws IOException {
+    out.abort();
   }
 }

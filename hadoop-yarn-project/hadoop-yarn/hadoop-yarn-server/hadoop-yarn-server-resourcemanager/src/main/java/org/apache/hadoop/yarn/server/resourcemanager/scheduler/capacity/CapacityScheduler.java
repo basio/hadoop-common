@@ -36,10 +36,12 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -64,6 +66,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.PreemptableResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppReport;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
@@ -571,8 +574,7 @@ public class CapacityScheduler
         application.showRequests();
   
         // Update application requests
-        application.updateResourceRequests(ask, 
-            blacklistAdditions, blacklistRemovals);
+        application.updateResourceRequests(ask);
   
         LOG.debug("allocate: post-update");
         application.showRequests();
@@ -583,6 +585,8 @@ public class CapacityScheduler
           " applicationAttemptId=" + applicationAttemptId + 
           " #ask=" + ask.size());
       }
+
+      application.updateBlacklist(blacklistAdditions, blacklistRemovals);
 
       return application.getAllocation(getResourceCalculator(),
                    clusterResource, getMinimumResourceCapability());
@@ -626,6 +630,10 @@ public class CapacityScheduler
     }
 
     FiCaSchedulerNode node = getNode(nm.getNodeID());
+    
+    // Update resource if any change
+    SchedulerUtils.updateResourceIfChanged(node, nm, clusterResource, LOG);
+    
     List<UpdatedContainerInfo> containerInfoList = nm.pullContainerUpdates();
     List<ContainerStatus> newlyLaunchedContainers = new ArrayList<ContainerStatus>();
     List<ContainerStatus> completedContainers = new ArrayList<ContainerStatus>();
@@ -692,7 +700,7 @@ public class CapacityScheduler
           node.getReservedContainer().getContainerId().getApplicationAttemptId()
           );
     }
-
+  
   }
 
   private void containerLaunchedOnNode(ContainerId containerId, FiCaSchedulerNode node) {
@@ -854,6 +862,13 @@ public class CapacityScheduler
     return app == null ? null : new SchedulerAppReport(app);
   }
   
+  @Override
+  public ApplicationResourceUsageReport getAppResourceUsageReport(
+      ApplicationAttemptId applicationAttemptId) {
+    FiCaSchedulerApp app = getApplication(applicationAttemptId);
+    return app == null ? null : app.getResourceUsageReport();
+  }
+  
   @Lock(Lock.NoLock.class)
   FiCaSchedulerNode getNode(NodeId nodeId) {
     return nodes.get(nodeId);
@@ -913,4 +928,28 @@ public class CapacityScheduler
         RMContainerEventType.KILL);
   }
 
+  @Override
+  public synchronized boolean checkAccess(UserGroupInformation callerUGI,
+      QueueACL acl, String queueName) {
+    CSQueue queue = getQueue(queueName);
+    if (queue == null) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("ACL not found for queue access-type " + acl
+            + " for queue " + queueName);
+      }
+      return false;
+    }
+    return queue.hasAccess(acl, callerUGI);
+  }
+
+  @Override
+  public List<ApplicationAttemptId> getAppsInQueue(String queueName) {
+    CSQueue queue = queues.get(queueName);
+    if (queue == null) {
+      return null;
+    }
+    List<ApplicationAttemptId> apps = new ArrayList<ApplicationAttemptId>();
+    queue.collectSchedulerApplications(apps);
+    return apps;
+  }
 }

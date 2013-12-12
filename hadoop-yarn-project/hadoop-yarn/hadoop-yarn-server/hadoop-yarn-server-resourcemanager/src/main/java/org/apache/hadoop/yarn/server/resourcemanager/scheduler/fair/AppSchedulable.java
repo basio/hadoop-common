@@ -51,7 +51,6 @@ public class AppSchedulable extends Schedulable {
   private FairScheduler scheduler;
   private FSSchedulerApp app;
   private Resource demand = Resources.createResource(0);
-  private boolean runnable = false; // everyone starts as not runnable
   private long startTime;
   private static RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
   private static final Log LOG = LogFactory.getLog(AppSchedulable.class);
@@ -61,7 +60,7 @@ public class AppSchedulable extends Schedulable {
   public AppSchedulable(FairScheduler scheduler, FSSchedulerApp app, FSLeafQueue queue) {
     this.scheduler = scheduler;
     this.app = app;
-    this.startTime = System.currentTimeMillis();
+    this.startTime = scheduler.getClock().getTime();
     this.queue = queue;
     this.containerTokenSecretManager = scheduler.
     		getContainerTokenSecretManager();
@@ -139,18 +138,6 @@ public class AppSchedulable extends Schedulable {
   }
 
   /**
-   * Is this application runnable? Runnable means that the user and queue
-   * application counts are within configured quotas.
-   */
-  public boolean getRunnable() {
-    return runnable;
-  }
-
-  public void setRunnable(boolean runnable) {
-    this.runnable = runnable;
-  }
-
-  /**
    * Create and return a container object reflecting an allocation for the
    * given appliction on the given node with the given capability and
    * priority.
@@ -192,10 +179,6 @@ public class AppSchedulable extends Schedulable {
       RMContainer rmContainer = app.reserve(node, priority, null,
           container);
       node.reserveResource(app, priority, rmContainer);
-      getMetrics().reserveResource(app.getUser(),
-          container.getResource());
-      scheduler.getRootQueueMetrics().reserveResource(app.getUser(),
-          container.getResource());
     }
 
     else {
@@ -215,8 +198,6 @@ public class AppSchedulable extends Schedulable {
     app.unreserve(node, priority);
     node.unreserveResource(app);
     getMetrics().unreserveResource(
-        app.getUser(), rmContainer.getContainer().getResource());
-    scheduler.getRootQueueMetrics().unreserveResource(
         app.getUser(), rmContainer.getContainer().getResource());
   }
 
@@ -274,7 +255,9 @@ public class AppSchedulable extends Schedulable {
   }
 
   private Resource assignContainer(FSSchedulerNode node, boolean reserved) {
-    LOG.info("Node offered to app: " + getName() + " reserved: " + reserved);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Node offered to app: " + getName() + " reserved: " + reserved);
+    }
 
     if (reserved) {
       RMContainer rmContainer = node.getReservedContainer();
@@ -285,9 +268,6 @@ public class AppSchedulable extends Schedulable {
         unreserve(priority, node);
         return Resources.none();
       }
-    } else {
-      // If this app is over quota, don't schedule anything
-      if (!(getRunnable())) { return Resources.none(); }
     }
 
     Collection<Priority> prioritiesToTry = (reserved) ? 
@@ -316,10 +296,19 @@ public class AppSchedulable extends Schedulable {
               + localRequest);
         }
         
-        NodeType allowedLocality = app.getAllowedLocalityLevel(priority,
-            scheduler.getNumClusterNodes(), scheduler.getNodeLocalityThreshold(),
-            scheduler.getRackLocalityThreshold());
-        
+        NodeType allowedLocality;
+        if (scheduler.isContinuousSchedulingEnabled()) {
+          allowedLocality = app.getAllowedLocalityLevelByTime(priority,
+                  scheduler.getNodeLocalityDelayMs(),
+                  scheduler.getRackLocalityDelayMs(),
+                  scheduler.getClock().getTime());
+        } else {
+          allowedLocality = app.getAllowedLocalityLevel(priority,
+                  scheduler.getNumClusterNodes(),
+                  scheduler.getNodeLocalityThreshold(),
+                  scheduler.getRackLocalityThreshold());
+        }
+
         if (rackLocalRequest != null && rackLocalRequest.getNumContainers() != 0
             && localRequest != null && localRequest.getNumContainers() != 0) {
           return assignContainer(node, priority,

@@ -837,16 +837,16 @@ public class NNThroughputBenchmark implements Tool {
       dnRegistration = new DatanodeRegistration(
           new DatanodeID(DNS.getDefaultIP("default"),
               DNS.getDefaultHost("default", "default"),
-              "", getNodePort(dnIdx),
+              DataNode.generateUuid(), getNodePort(dnIdx),
               DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+              DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
               DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT),
-          new DataStorage(nsInfo, ""),
+          new DataStorage(nsInfo),
           new ExportedBlockKeys(), VersionInfo.getVersion());
-      DataNode.setNewStorageID(dnRegistration);
       // register datanode
       dnRegistration = nameNodeProto.registerDatanode(dnRegistration);
       //first block reports
-      storage = new DatanodeStorage(dnRegistration.getStorageID());
+      storage = new DatanodeStorage(dnRegistration.getDatanodeUuid());
       final StorageBlockReport[] reports = {
           new StorageBlockReport(storage,
               new BlockListAsLongs(null, null).getBlockListAsLongs())
@@ -862,10 +862,10 @@ public class NNThroughputBenchmark implements Tool {
     void sendHeartbeat() throws IOException {
       // register datanode
       // TODO:FEDERATION currently a single block pool is supported
-      StorageReport[] rep = { new StorageReport(dnRegistration.getStorageID(),
+      StorageReport[] rep = { new StorageReport(dnRegistration.getDatanodeUuid(),
           false, DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED) };
-      DatanodeCommand[] cmds = nameNodeProto.sendHeartbeat(dnRegistration,
-          rep, 0, 0, 0).getCommands();
+      DatanodeCommand[] cmds = nameNodeProto.sendHeartbeat(dnRegistration, rep,
+          0L, 0L, 0, 0, 0).getCommands();
       if(cmds != null) {
         for (DatanodeCommand cmd : cmds ) {
           if(LOG.isDebugEnabled()) {
@@ -909,10 +909,10 @@ public class NNThroughputBenchmark implements Tool {
     @SuppressWarnings("unused") // keep it for future blockReceived benchmark
     int replicateBlocks() throws IOException {
       // register datanode
-      StorageReport[] rep = { new StorageReport(dnRegistration.getStorageID(),
+      StorageReport[] rep = { new StorageReport(dnRegistration.getDatanodeUuid(),
           false, DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED) };
       DatanodeCommand[] cmds = nameNodeProto.sendHeartbeat(dnRegistration,
-          rep, 0, 0, 0).getCommands();
+          rep, 0L, 0L, 0, 0, 0).getCommands();
       if (cmds != null) {
         for (DatanodeCommand cmd : cmds) {
           if (cmd.getAction() == DatanodeProtocol.DNA_TRANSFER) {
@@ -939,14 +939,14 @@ public class NNThroughputBenchmark implements Tool {
           DatanodeInfo dnInfo = blockTargets[t];
           DatanodeRegistration receivedDNReg;
           receivedDNReg = new DatanodeRegistration(dnInfo,
-            new DataStorage(nsInfo, dnInfo.getStorageID()),
+            new DataStorage(nsInfo),
             new ExportedBlockKeys(), VersionInfo.getVersion());
           ReceivedDeletedBlockInfo[] rdBlocks = {
             new ReceivedDeletedBlockInfo(
                   blocks[i], ReceivedDeletedBlockInfo.BlockStatus.RECEIVED_BLOCK,
                   null) };
           StorageReceivedDeletedBlocks[] report = { new StorageReceivedDeletedBlocks(
-              receivedDNReg.getStorageID(), rdBlocks) };
+              receivedDNReg.getDatanodeUuid(), rdBlocks) };
           nameNodeProto.blockReceivedAndDeleted(receivedDNReg, nameNode
               .getNamesystem().getBlockPoolId(), report);
         }
@@ -1069,7 +1069,7 @@ public class NNThroughputBenchmark implements Tool {
               loc.getBlock().getLocalBlock(),
               ReceivedDeletedBlockInfo.BlockStatus.RECEIVED_BLOCK, null) };
           StorageReceivedDeletedBlocks[] report = { new StorageReceivedDeletedBlocks(
-              datanodes[dnIdx].dnRegistration.getStorageID(), rdBlocks) };
+              datanodes[dnIdx].dnRegistration.getDatanodeUuid(), rdBlocks) };
           nameNodeProto.blockReceivedAndDeleted(datanodes[dnIdx].dnRegistration, loc
               .getBlock().getBlockPoolId(), report);
         }
@@ -1305,7 +1305,7 @@ public class NNThroughputBenchmark implements Tool {
 
   /**
    * Main method of the benchmark.
-   * @param args command line parameters
+   * @param aArgs command line parameters
    */
   @Override // Tool
   public int run(String[] aArgs) throws Exception {

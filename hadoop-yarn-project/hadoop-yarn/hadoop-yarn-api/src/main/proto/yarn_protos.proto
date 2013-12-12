@@ -58,6 +58,11 @@ message ResourceProto {
   optional int32 virtual_cores = 2;
 }
 
+message ResourceOptionProto {
+  optional ResourceProto resource = 1;
+  optional int32 over_commit_timeout = 2;
+}
+
 message PriorityProto {
   optional int32 priority = 1;
 }
@@ -100,6 +105,7 @@ message URLProto {
   optional string host = 2;
   optional int32 port = 3;
   optional string file = 4;
+  optional string userInfo = 5;
 }
 
 enum LocalResourceVisibilityProto {
@@ -303,6 +309,22 @@ enum ContainerExitStatusProto {
   INVALID = -1000;
   ABORTED = -100;
   DISKS_FAILED = -101;
+}
+
+message ContainerResourceIncreaseRequestProto {
+  optional ContainerIdProto container_id = 1;
+  optional ResourceProto capability = 2;
+} 
+
+message ContainerResourceIncreaseProto {
+  optional ContainerIdProto container_id = 1;
+  optional ResourceProto capability = 2;
+  optional hadoop.common.TokenProto container_token = 3;
+}
+
+message ContainerResourceDecreaseProto {
+  optional ContainerIdProto container_id = 1;
+  optional ResourceProto capability = 2;
 }
 
 ////////////////////////////////////////////////////////////////////////

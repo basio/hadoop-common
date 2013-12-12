@@ -33,7 +33,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
-import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.JobStatus;
 import org.apache.hadoop.mapreduce.MRJobConfig;
@@ -108,6 +107,10 @@ public class ClientServiceDelegate {
         CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY,
         this.conf.getInt(MRJobConfig.MR_CLIENT_TO_AM_IPC_MAX_RETRIES,
             MRJobConfig.DEFAULT_MR_CLIENT_TO_AM_IPC_MAX_RETRIES));
+    this.conf.setInt(
+        CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_ON_SOCKET_TIMEOUTS_KEY,
+        this.conf.getInt(MRJobConfig.MR_CLIENT_TO_AM_IPC_MAX_RETRIES_ON_TIMEOUTS,
+            MRJobConfig.DEFAULT_MR_CLIENT_TO_AM_IPC_MAX_RETRIES_ON_TIMEOUTS));
     this.rm = rm;
     this.jobId = jobId;
     this.historyServerProxy = historyServerProxy;
@@ -424,9 +427,6 @@ public class ClientServiceDelegate {
       String historyTrackingUrl = report.getTrackingUrl();
       String url = StringUtils.isNotEmpty(historyTrackingUrl)
           ? historyTrackingUrl : trackingUrl;
-      if (!UNAVAILABLE.equals(url)) {
-        url = HttpConfig.getSchemePrefix() + url;
-      }
       jobStatus = TypeConverter.fromYarn(report, url);
     }
     return jobStatus;

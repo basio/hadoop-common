@@ -28,8 +28,8 @@ import org.apache.hadoop.oncrpc.XDR;
  * WRITE3 Request
  */
 public class WRITE3Request extends RequestWithHandle {
-  private final long offset;
-  private final int count;
+  private long offset;
+  private int count;
   private final WriteStableHow stableHow;
   private final ByteBuffer data;
 
@@ -54,10 +54,18 @@ public class WRITE3Request extends RequestWithHandle {
     return this.offset;
   }
 
+  public void setOffset(long offset) {
+    this.offset = offset;
+  }
+  
   public int getCount() {
     return this.count;
   }
 
+  public void setCount(int count) {
+    this.count = count;
+  }
+  
   public WriteStableHow getStableHow() {
     return this.stableHow;
   }
@@ -74,5 +82,11 @@ public class WRITE3Request extends RequestWithHandle {
     xdr.writeInt(stableHow.getValue());
     xdr.writeInt(count);
     xdr.writeFixedOpaque(data.array(), count);
+  }
+  
+  @Override
+  public String toString() {
+    return String.format("fileId: %d offset: %d count: %d stableHow: %s",
+        handle.getFileId(), offset, count, stableHow.name());
   }
 }

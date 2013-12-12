@@ -641,6 +641,8 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
   private ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1);
   private ScheduledFuture failWaitTriggerScheduledFuture;
 
+  private JobState lastNonFinalState = JobState.NEW;
+
   public JobImpl(JobId jobId, ApplicationAttemptId applicationAttemptId,
       Configuration conf, EventHandler eventHandler,
       TaskAttemptListener taskAttemptListener,
@@ -928,7 +930,14 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
   public JobState getState() {
     readLock.lock();
     try {
-      return getExternalState(getInternalState());
+      JobState state = getExternalState(getInternalState());
+      if (!appContext.hasSuccessfullyUnregistered()
+          && (state == JobState.SUCCEEDED || state == JobState.FAILED
+          || state == JobState.KILLED || state == JobState.ERROR)) {
+        return lastNonFinalState;
+      } else {
+        return state;
+      }
     } finally {
       readLock.unlock();
     }
@@ -972,11 +981,21 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
       if (oldState != getInternalState()) {
         LOG.info(jobId + "Job Transitioned from " + oldState + " to "
                  + getInternalState());
+        rememberLastNonFinalState(oldState);
       }
     }
     
     finally {
       writeLock.unlock();
+    }
+  }
+
+  private void rememberLastNonFinalState(JobStateInternal stateInternal) {
+    JobState state = getExternalState(stateInternal);
+    // if state is not the final state, set lastNonFinalState
+    if (state != JobState.SUCCEEDED && state != JobState.FAILED
+        && state != JobState.KILLED && state != JobState.ERROR) {
+      lastNonFinalState = state;
     }
   }
 
@@ -1154,11 +1173,7 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
     // these are no longer "system" settings, necessarily; user may override
     int sysMaxMaps = conf.getInt(MRJobConfig.JOB_UBERTASK_MAXMAPS, 9);
 
-    //FIXME: handling multiple reduces within a single AM does not seem to
-    //work.
     int sysMaxReduces = conf.getInt(MRJobConfig.JOB_UBERTASK_MAXREDUCES, 1);
-    boolean isValidUberMaxReduces = (sysMaxReduces == 0)
-        || (sysMaxReduces == 1);
 
     long sysMaxBytes = conf.getLong(MRJobConfig.JOB_UBERTASK_MAXBYTES,
         fs.getDefaultBlockSize(this.remoteJobSubmitDir)); // FIXME: this is wrong; get FS from
@@ -1206,7 +1221,7 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
     // and thus requires sequential execution.
     isUber = uberEnabled && smallNumMapTasks && smallNumReduceTasks
         && smallInput && smallMemory && smallCpu 
-        && notChainJob && isValidUberMaxReduces;
+        && notChainJob;
 
     if (isUber) {
       LOG.info("Uberizing job " + jobId + ": " + numMapTasks + "m+"
@@ -1240,8 +1255,6 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
         msg.append(" too much RAM;");
       if (!notChainJob)
         msg.append(" chainjob;");
-      if (!isValidUberMaxReduces)
-        msg.append(" not supported uber max reduces");
       LOG.info(msg.toString());
     }
   }

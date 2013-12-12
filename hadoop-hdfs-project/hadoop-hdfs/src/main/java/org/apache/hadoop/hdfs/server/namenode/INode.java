@@ -35,7 +35,6 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference.DstReference;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference.WithName;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.FileWithSnapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.hdfs.util.ChunkedArrayList;
@@ -315,7 +314,7 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
    * 1.2.2 Else do nothing with the current INode. Recursively clean its 
    * children.
    * 
-   * 1.3 The current inode is a {@link FileWithSnapshot}.
+   * 1.3 The current inode is a file with snapshot.
    * Call recordModification(..) to capture the current states.
    * Mark the INode as deleted.
    * 
@@ -328,7 +327,7 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
    * 2. When deleting a snapshot.
    * 2.1 To clean {@link INodeFile}: do nothing.
    * 2.2 To clean {@link INodeDirectory}: recursively clean its children.
-   * 2.3 To clean {@link FileWithSnapshot}: delete the corresponding snapshot in
+   * 2.3 To clean INodeFile with snapshot: delete the corresponding snapshot in
    * its diff list.
    * 2.4 To clean {@link INodeDirectoryWithSnapshot}: delete the corresponding 
    * snapshot in its diff list. Recursively clean its children.
@@ -371,29 +370,49 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
   public abstract void destroyAndCollectBlocks(
       BlocksMapUpdateInfo collectedBlocks, List<INode> removedINodes);
 
-  /** Compute {@link ContentSummary}. */
+  /** Compute {@link ContentSummary}. Blocking call */
   public final ContentSummary computeContentSummary() {
-    final Content.Counts counts = computeContentSummary(
-        Content.Counts.newInstance());
+    return computeAndConvertContentSummary(
+        new ContentSummaryComputationContext());
+  }
+
+  /**
+   * Compute {@link ContentSummary}. 
+   */
+  public final ContentSummary computeAndConvertContentSummary(
+      ContentSummaryComputationContext summary) {
+    Content.Counts counts = computeContentSummary(summary).getCounts();
+    final Quota.Counts q = getQuotaCounts();
     return new ContentSummary(counts.get(Content.LENGTH),
         counts.get(Content.FILE) + counts.get(Content.SYMLINK),
-        counts.get(Content.DIRECTORY), getNsQuota(),
-        counts.get(Content.DISKSPACE), getDsQuota());
+        counts.get(Content.DIRECTORY), q.get(Quota.NAMESPACE),
+        counts.get(Content.DISKSPACE), q.get(Quota.DISKSPACE));
   }
 
   /**
    * Count subtree content summary with a {@link Content.Counts}.
    *
-   * @param counts The subtree counts for returning.
-   * @return The same objects as the counts parameter.
+   * @param summary the context object holding counts for the subtree.
+   * @return The same objects as summary.
    */
-  public abstract Content.Counts computeContentSummary(Content.Counts counts);
+  public abstract ContentSummaryComputationContext computeContentSummary(
+      ContentSummaryComputationContext summary);
+
   
   /**
    * Check and add namespace/diskspace consumed to itself and the ancestors.
    * @throws QuotaExceededException if quote is violated.
    */
   public void addSpaceConsumed(long nsDelta, long dsDelta, boolean verify) 
+      throws QuotaExceededException {
+    addSpaceConsumed2Parent(nsDelta, dsDelta, verify);
+  }
+
+  /**
+   * Check and add namespace/diskspace consumed to itself and the ancestors.
+   * @throws QuotaExceededException if quote is violated.
+   */
+  void addSpaceConsumed2Parent(long nsDelta, long dsDelta, boolean verify) 
       throws QuotaExceededException {
     if (parent != null) {
       parent.addSpaceConsumed(nsDelta, dsDelta, verify);
@@ -402,18 +421,15 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
 
   /**
    * Get the quota set for this inode
-   * @return the quota if it is set; -1 otherwise
+   * @return the quota counts.  The count is -1 if it is not set.
    */
-  public long getNsQuota() {
-    return -1;
-  }
-
-  public long getDsQuota() {
-    return -1;
+  public Quota.Counts getQuotaCounts() {
+    return Quota.Counts.newInstance(-1, -1);
   }
   
   public final boolean isQuotaSet() {
-    return getNsQuota() >= 0 || getDsQuota() >= 0;
+    final Quota.Counts q = getQuotaCounts();
+    return q.get(Quota.NAMESPACE) >= 0 || q.get(Quota.DISKSPACE) >= 0;
   }
   
   /**
@@ -734,6 +750,53 @@ public abstract class INode implements INodeAttributes, Diff.Element<byte[]> {
      */
     public void clear() {
       toDeleteList.clear();
+    }
+  }
+
+  /** INode feature such as {@link FileUnderConstructionFeature}
+   *  and {@link DirectoryWithQuotaFeature}.
+   */
+  interface Feature<F extends Feature<F>> {
+    /** @return the next feature. */
+    public F getNextFeature();
+
+    /** Set the next feature. */
+    public void setNextFeature(F next);
+
+    /** Utility methods such as addFeature and removeFeature. */
+    static class Util {
+      /**
+       * Add a feature to the linked list.
+       * @return the new head.
+       */
+      static <F extends Feature<F>> F addFeature(F feature, F head) {
+        feature.setNextFeature(head);
+        return feature;
+      }
+
+      /**
+       * Remove a feature from the linked list.
+       * @return the new head.
+       */
+      static <F extends Feature<F>> F removeFeature(F feature, F head) {
+        if (feature == head) {
+          final F newHead = head.getNextFeature();
+          head.setNextFeature(null);
+          return newHead;
+        } else if (head != null) {
+          F prev = head;
+          F curr = head.getNextFeature();
+          for (; curr != null && curr != feature;
+              prev = curr, curr = curr.getNextFeature())
+            ;
+          if (curr != null) {
+            prev.setNextFeature(curr.getNextFeature());
+            curr.setNextFeature(null);
+            return head;
+          }
+        }
+        throw new IllegalStateException("Feature " + feature + " not found.");
+      }
     }
   }
 }

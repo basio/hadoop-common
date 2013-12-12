@@ -36,10 +36,13 @@ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCachePoolOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCloseOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCacheDirectiveInfoOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AllocateBlockIdOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AllowSnapshotOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.BlockListUpdatingOp;
@@ -52,7 +55,11 @@ import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.DeleteSnapshotOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.DisallowSnapshotOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.GetDelegationTokenOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.MkdirOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ModifyCachePoolOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ModifyCacheDirectiveInfoOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ReassignLeaseOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemoveCachePoolOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemoveCacheDirectiveInfoOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameOldOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameSnapshotOp;
@@ -78,6 +85,7 @@ import org.apache.hadoop.hdfs.util.ChunkedArrayList;
 import org.apache.hadoop.hdfs.util.Holder;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
 
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
@@ -362,15 +370,15 @@ public class FSEditLogLoader {
       }
 
       final INodesInPath iip = fsDir.getLastINodeInPath(addCloseOp.path);
-      final INodeFile oldFile = INodeFile.valueOf(iip.getINode(0), addCloseOp.path);
+      final INodeFile file = INodeFile.valueOf(iip.getINode(0), addCloseOp.path);
 
       // Update the salient file attributes.
-      oldFile.setAccessTime(addCloseOp.atime, null, fsDir.getINodeMap());
-      oldFile.setModificationTime(addCloseOp.mtime, null, fsDir.getINodeMap());
-      updateBlocks(fsDir, addCloseOp, oldFile);
+      file.setAccessTime(addCloseOp.atime, null, fsDir.getINodeMap());
+      file.setModificationTime(addCloseOp.mtime, null, fsDir.getINodeMap());
+      updateBlocks(fsDir, addCloseOp, file);
 
       // Now close the file
-      if (!oldFile.isUnderConstruction() &&
+      if (!file.isUnderConstruction() &&
           logVersion <= LayoutVersion.BUGFIX_HDFS_2991_VERSION) {
         // There was a bug (HDFS-2991) in hadoop < 0.23.1 where OP_CLOSE
         // could show up twice in a row. But after that version, this
@@ -380,11 +388,9 @@ public class FSEditLogLoader {
       }
       // One might expect that you could use removeLease(holder, path) here,
       // but OP_CLOSE doesn't serialize the holder. So, remove by path.
-      if (oldFile.isUnderConstruction()) {
-        INodeFileUnderConstruction ucFile = (INodeFileUnderConstruction) oldFile;
+      if (file.isUnderConstruction()) {
         fsNamesys.leaseManager.removeLeaseWithPrefixPath(addCloseOp.path);
-        INodeFile newFile = ucFile.toINodeFile(ucFile.getModificationTime());
-        fsDir.unprotectedReplaceINodeFile(addCloseOp.path, ucFile, newFile);
+        file.toCompleteFile(file.getModificationTime());
       }
       break;
     }
@@ -557,9 +563,8 @@ public class FSEditLogLoader {
 
       Lease lease = fsNamesys.leaseManager.getLease(
           reassignLeaseOp.leaseHolder);
-      INodeFileUnderConstruction pendingFile =
-          INodeFileUnderConstruction.valueOf( 
-              fsDir.getINode(reassignLeaseOp.path), reassignLeaseOp.path);
+      INodeFile pendingFile = fsDir.getINode(reassignLeaseOp.path).asFile();
+      Preconditions.checkState(pendingFile.isUnderConstruction());
       fsNamesys.reassignLeaseInternal(lease,
           reassignLeaseOp.path, reassignLeaseOp.newHolder, pendingFile);
       break;
@@ -586,7 +591,7 @@ public class FSEditLogLoader {
       fsNamesys.getSnapshotManager().deleteSnapshot(
           deleteSnapshotOp.snapshotRoot, deleteSnapshotOp.snapshotName,
           collectedBlocks, removedINodes);
-      fsNamesys.removeBlocks(collectedBlocks);
+      fsNamesys.removeBlocksAndUpdateSafemodeTotal(collectedBlocks);
       collectedBlocks.clear();
       fsNamesys.dir.removeFromInodeMap(removedINodes);
       removedINodes.clear();
@@ -629,6 +634,59 @@ public class FSEditLogLoader {
     case OP_ALLOCATE_BLOCK_ID: {
       AllocateBlockIdOp allocateBlockIdOp = (AllocateBlockIdOp) op;
       fsNamesys.setLastAllocatedBlockId(allocateBlockIdOp.blockId);
+      break;
+    }
+    case OP_ADD_CACHE_DIRECTIVE: {
+      AddCacheDirectiveInfoOp addOp = (AddCacheDirectiveInfoOp) op;
+      CacheDirectiveInfo result = fsNamesys.
+          getCacheManager().addDirectiveFromEditLog(addOp.directive);
+      if (toAddRetryCache) {
+        Long id = result.getId();
+        fsNamesys.addCacheEntryWithPayload(op.rpcClientId, op.rpcCallId, id);
+      }
+      break;
+    }
+    case OP_MODIFY_CACHE_DIRECTIVE: {
+      ModifyCacheDirectiveInfoOp modifyOp =
+          (ModifyCacheDirectiveInfoOp) op;
+      fsNamesys.getCacheManager().modifyDirective(
+          modifyOp.directive, null);
+      if (toAddRetryCache) {
+        fsNamesys.addCacheEntry(op.rpcClientId, op.rpcCallId);
+      }
+      break;
+    }
+    case OP_REMOVE_CACHE_DIRECTIVE: {
+      RemoveCacheDirectiveInfoOp removeOp =
+          (RemoveCacheDirectiveInfoOp) op;
+      fsNamesys.getCacheManager().removeDirective(removeOp.id, null);
+      if (toAddRetryCache) {
+        fsNamesys.addCacheEntry(op.rpcClientId, op.rpcCallId);
+      }
+      break;
+    }
+    case OP_ADD_CACHE_POOL: {
+      AddCachePoolOp addOp = (AddCachePoolOp) op;
+      fsNamesys.getCacheManager().addCachePool(addOp.info);
+      if (toAddRetryCache) {
+        fsNamesys.addCacheEntry(op.rpcClientId, op.rpcCallId);
+      }
+      break;
+    }
+    case OP_MODIFY_CACHE_POOL: {
+      ModifyCachePoolOp modifyOp = (ModifyCachePoolOp) op;
+      fsNamesys.getCacheManager().modifyCachePool(modifyOp.info);
+      if (toAddRetryCache) {
+        fsNamesys.addCacheEntry(op.rpcClientId, op.rpcCallId);
+      }
+      break;
+    }
+    case OP_REMOVE_CACHE_POOL: {
+      RemoveCachePoolOp removeOp = (RemoveCachePoolOp) op;
+      fsNamesys.getCacheManager().removeCachePool(removeOp.poolName);
+      if (toAddRetryCache) {
+        fsNamesys.addCacheEntry(op.rpcClientId, op.rpcCallId);
+      }
       break;
     }
     default:
@@ -691,9 +749,8 @@ public class FSEditLogLoader {
       if (oldBlock instanceof BlockInfoUnderConstruction &&
           (!isLastBlock || op.shouldCompleteLastBlock())) {
         changeMade = true;
-        fsNamesys.getBlockManager().forceCompleteBlock(
-            (INodeFileUnderConstruction)file,
-            (BlockInfoUnderConstruction)oldBlock);
+        fsNamesys.getBlockManager().forceCompleteBlock(file,
+            (BlockInfoUnderConstruction) oldBlock);
       }
       if (changeMade) {
         // The state or gen-stamp of the block has changed. So, we may be
@@ -714,8 +771,7 @@ public class FSEditLogLoader {
             + path);
       }
       Block oldBlock = oldBlocks[oldBlocks.length - 1];
-      boolean removed = fsDir.unprotectedRemoveBlock(path,
-          (INodeFileUnderConstruction) file, oldBlock);
+      boolean removed = fsDir.unprotectedRemoveBlock(path, file, oldBlock);
       if (!removed && !(op instanceof UpdateBlocksOp)) {
         throw new IOException("Trying to delete non-existant block " + oldBlock);
       }

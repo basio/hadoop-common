@@ -575,6 +575,7 @@ public class Client {
         try {
           this.socket = socketFactory.createSocket();
           this.socket.setTcpNoDelay(tcpNoDelay);
+          this.socket.setKeepAlive(true);
           
           /*
            * Bind the socket to the host specified in the principal name of the
@@ -1157,6 +1158,7 @@ public class Client {
         // cleanup calls
         cleanupCalls();
       }
+      closeConnection();
       if (LOG.isDebugEnabled())
         LOG.debug(getName() + ": closed");
     }
@@ -1561,8 +1563,13 @@ public class Client {
         final int max = conf.getInt(
             CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY,
             CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_DEFAULT);
+        final int retryInterval = conf.getInt(
+            CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_RETRY_INTERVAL_KEY,
+            CommonConfigurationKeysPublic
+                .IPC_CLIENT_CONNECT_RETRY_INTERVAL_DEFAULT);
+
         connectionRetryPolicy = RetryPolicies.retryUpToMaximumCountWithFixedSleep(
-            max, 1, TimeUnit.SECONDS);
+            max, retryInterval, TimeUnit.MILLISECONDS);
       }
 
       boolean doPing =

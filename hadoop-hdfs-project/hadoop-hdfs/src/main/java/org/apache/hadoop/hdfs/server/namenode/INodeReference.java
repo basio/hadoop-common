@@ -26,7 +26,6 @@ import java.util.List;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.FileWithSnapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 
@@ -102,9 +101,8 @@ public abstract class INodeReference extends INode {
     }
     if (wn != null) {
       INode referred = wc.getReferredINode();
-      if (referred instanceof FileWithSnapshot) {
-        return ((FileWithSnapshot) referred).getDiffs().getPrior(
-            wn.lastSnapshotId);
+      if (referred.isFile() && referred.asFile().isWithSnapshot()) {
+        return referred.asFile().getDiffs().getPrior(wn.lastSnapshotId);
       } else if (referred instanceof INodeDirectoryWithSnapshot) { 
         return ((INodeDirectoryWithSnapshot) referred).getDiffs().getPrior(
             wn.lastSnapshotId);
@@ -278,8 +276,9 @@ public abstract class INodeReference extends INode {
   }
 
   @Override
-  public Content.Counts computeContentSummary(Content.Counts counts) {
-    return referred.computeContentSummary(counts);
+  public ContentSummaryComputationContext computeContentSummary(
+      ContentSummaryComputationContext summary) {
+    return referred.computeContentSummary(summary);
   }
 
   @Override
@@ -294,15 +293,10 @@ public abstract class INodeReference extends INode {
   }
 
   @Override
-  public final long getNsQuota() {
-    return referred.getNsQuota();
+  public Quota.Counts getQuotaCounts() {
+    return referred.getQuotaCounts();
   }
 
-  @Override
-  public final long getDsQuota() {
-    return referred.getDsQuota();
-  }
-  
   @Override
   public final void clear() {
     super.clear();
@@ -444,12 +438,13 @@ public abstract class INodeReference extends INode {
     }
     
     @Override
-    public final Content.Counts computeContentSummary(Content.Counts counts) {
+    public final ContentSummaryComputationContext computeContentSummary(
+        ContentSummaryComputationContext summary) {
       //only count diskspace for WithName
       final Quota.Counts q = Quota.Counts.newInstance();
       computeQuotaUsage(q, false, lastSnapshotId);
-      counts.add(Content.DISKSPACE, q.get(Quota.DISKSPACE));
-      return counts;
+      summary.getCounts().add(Content.DISKSPACE, q.get(Quota.DISKSPACE));
+      return summary;
     }
 
     @Override
@@ -550,9 +545,8 @@ public abstract class INodeReference extends INode {
     private Snapshot getSelfSnapshot() {
       INode referred = getReferredINode().asReference().getReferredINode();
       Snapshot snapshot = null;
-      if (referred instanceof FileWithSnapshot) {
-        snapshot = ((FileWithSnapshot) referred).getDiffs().getPrior(
-            lastSnapshotId);
+      if (referred.isFile() && referred.asFile().isWithSnapshot()) {
+        snapshot = referred.asFile().getDiffs().getPrior(lastSnapshotId);
       } else if (referred instanceof INodeDirectoryWithSnapshot) {
         snapshot = ((INodeDirectoryWithSnapshot) referred).getDiffs().getPrior(
             lastSnapshotId);
@@ -640,22 +634,20 @@ public abstract class INodeReference extends INode {
         Snapshot snapshot = getSelfSnapshot(prior);
         
         INode referred = getReferredINode().asReference().getReferredINode();
-        if (referred instanceof FileWithSnapshot) {
-          // if referred is a file, it must be a FileWithSnapshot since we did
+        if (referred.isFile() && referred.asFile().isWithSnapshot()) {
+          // if referred is a file, it must be a file with Snapshot since we did
           // recordModification before the rename
-          FileWithSnapshot sfile = (FileWithSnapshot) referred;
+          INodeFile file = referred.asFile();
           // make sure we mark the file as deleted
-          sfile.deleteCurrentFile();
-          if (snapshot != null) {
-            try {
-              // when calling cleanSubtree of the referred node, since we 
-              // compute quota usage updates before calling this destroy 
-              // function, we use true for countDiffChange
-              referred.cleanSubtree(snapshot, prior, collectedBlocks,
-                  removedINodes, true);
-            } catch (QuotaExceededException e) {
-              LOG.error("should not exceed quota while snapshot deletion", e);
-            }
+          file.getFileWithSnapshotFeature().deleteCurrentFile();
+          try {
+            // when calling cleanSubtree of the referred node, since we 
+            // compute quota usage updates before calling this destroy 
+            // function, we use true for countDiffChange
+            referred.cleanSubtree(snapshot, prior, collectedBlocks,
+                removedINodes, true);
+          } catch (QuotaExceededException e) {
+            LOG.error("should not exceed quota while snapshot deletion", e);
           }
         } else if (referred instanceof INodeDirectoryWithSnapshot) {
           // similarly, if referred is a directory, it must be an
@@ -676,9 +668,8 @@ public abstract class INodeReference extends INode {
       WithCount wc = (WithCount) getReferredINode().asReference();
       INode referred = wc.getReferredINode();
       Snapshot lastSnapshot = null;
-      if (referred instanceof FileWithSnapshot) {
-        lastSnapshot = ((FileWithSnapshot) referred).getDiffs()
-            .getLastSnapshot(); 
+      if (referred.isFile() && referred.asFile().isWithSnapshot()) {
+        lastSnapshot = referred.asFile().getDiffs().getLastSnapshot();
       } else if (referred instanceof INodeDirectoryWithSnapshot) {
         lastSnapshot = ((INodeDirectoryWithSnapshot) referred)
             .getLastSnapshot();

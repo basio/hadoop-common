@@ -24,7 +24,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.ClientBaseWithFixes;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.server.resourcemanager.recovery.TestRMStateStore.TestDispatcher;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreTestBase.TestDispatcher;
 import org.apache.hadoop.util.ZKUtil;
 
 import org.apache.zookeeper.CreateMode;
@@ -37,23 +37,27 @@ import org.junit.Test;
 
 import java.io.IOException;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 public class TestZKRMStateStoreZKClientConnections extends
     ClientBaseWithFixes {
+
   private static final int ZK_OP_WAIT_TIME = 3000;
   private Log LOG =
       LogFactory.getLog(TestZKRMStateStoreZKClientConnections.class);
 
   class TestZKClient {
+
     ZKRMStateStore store;
     boolean forExpire = false;
     TestForwardingWatcher watcher;
     CyclicBarrier syncBarrier = new CyclicBarrier(2);
 
     protected class TestZKRMStateStore extends ZKRMStateStore {
+
       public TestZKRMStateStore(Configuration conf, String workingZnode)
           throws Exception {
         init(conf);
@@ -87,6 +91,7 @@ public class TestZKRMStateStoreZKClientConnections extends
 
     private class TestForwardingWatcher extends
         ClientBaseWithFixes.CountdownWatcher {
+
       public void process(WatchedEvent event) {
         super.process(event);
         try {
@@ -108,6 +113,37 @@ public class TestZKRMStateStoreZKClientConnections extends
       this.store = new TestZKRMStateStore(conf, workingZnode);
       return this.store;
     }
+  }
+
+  @Test (timeout = 20000)
+  public void testZKClientRetry() throws Exception {
+    TestZKClient zkClientTester = new TestZKClient();
+    final String path = "/test";
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.setInt(YarnConfiguration.ZK_RM_STATE_STORE_TIMEOUT_MS, 1000);
+    conf.setLong(YarnConfiguration.ZK_RM_STATE_STORE_RETRY_INTERVAL_MS, 100);
+    final ZKRMStateStore store =
+        (ZKRMStateStore) zkClientTester.getRMStateStore(conf);
+    TestDispatcher dispatcher = new TestDispatcher();
+    store.setRMDispatcher(dispatcher);
+    final AtomicBoolean assertionFailedInThread = new AtomicBoolean(false);
+
+    stopServer();
+    Thread clientThread = new Thread() {
+      @Override
+      public void run() {
+        try {
+          store.getDataWithRetries(path, true);
+        } catch (Exception e) {
+          e.printStackTrace();
+          assertionFailedInThread.set(true);
+        }
+      }
+    };
+    Thread.sleep(2000);
+    startServer();
+    clientThread.join();
+    Assert.assertFalse(assertionFailedInThread.get());
   }
 
   @Test(timeout = 20000)
@@ -187,7 +223,7 @@ public class TestZKRMStateStoreZKClientConnections extends
     }
   }
 
-  @Test (timeout = 20000)
+  @Test(timeout = 20000)
   public void testSetZKAcl() {
     TestZKClient zkClientTester = new TestZKClient();
     YarnConfiguration conf = new YarnConfiguration();
@@ -196,10 +232,11 @@ public class TestZKRMStateStoreZKClientConnections extends
       zkClientTester.store.zkClient.delete(zkClientTester.store
           .znodeWorkingPath, -1);
       fail("Shouldn't be able to delete path");
-    } catch (Exception e) {/* expected behavior */}
+    } catch (Exception e) {/* expected behavior */
+    }
   }
 
-  @Test (timeout = 20000)
+  @Test(timeout = 20000)
   public void testInvalidZKAclConfiguration() {
     TestZKClient zkClientTester = new TestZKClient();
     YarnConfiguration conf = new YarnConfiguration();

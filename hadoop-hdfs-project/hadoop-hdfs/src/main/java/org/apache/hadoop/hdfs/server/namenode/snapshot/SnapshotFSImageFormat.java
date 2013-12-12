@@ -36,8 +36,6 @@ import org.apache.hadoop.hdfs.server.namenode.INodeDirectoryAttributes;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.INodeFileAttributes;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.FileWithSnapshot.FileDiff;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.FileWithSnapshot.FileDiffList;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot.DirectoryDiff;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot.DirectoryDiffList;
 import org.apache.hadoop.hdfs.tools.snapshot.SnapshotDiff;
@@ -99,8 +97,7 @@ public class SnapshotFSImageFormat {
   
   public static void saveFileDiffList(final INodeFile file,
       final DataOutput out) throws IOException {
-    saveINodeDiffs(file instanceof FileWithSnapshot?
-        ((FileWithSnapshot)file).getDiffs(): null, out, null);
+    saveINodeDiffs(file.getDiffs(), out, null);
   }
 
   public static FileDiffList loadFileDiffList(DataInput in,
@@ -203,6 +200,9 @@ public class SnapshotFSImageFormat {
       // useful, but set the parent here to be consistent with the original 
       // fsdir tree.
       deleted.setParent(parent);
+      if (deleted.isFile()) {
+        loader.updateBlocksMap(deleted.asFile());
+      }
     }
     return deletedList;
   }

@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -31,6 +32,7 @@ import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RegisterNodeManagerRequest;
@@ -40,6 +42,7 @@ import org.apache.hadoop.yarn.server.api.records.NodeHealthStatus;
 import org.apache.hadoop.yarn.server.api.records.NodeStatus;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
+import org.apache.hadoop.yarn.util.YarnVersionInfo;
 
 public class MockNM {
 
@@ -51,6 +54,7 @@ public class MockNM {
   private final int httpPort = 2;
   private MasterKey currentContainerTokenMasterKey;
   private MasterKey currentNMTokenMasterKey;
+  private String version;
 
   public MockNM(String nodeIdStr, int memory, ResourceTrackerService resourceTracker) {
     // scale vcores based on the requested memory
@@ -61,10 +65,16 @@ public class MockNM {
   }
 
   public MockNM(String nodeIdStr, int memory, int vcores,
-                ResourceTrackerService resourceTracker) {
+      ResourceTrackerService resourceTracker) {
+    this(nodeIdStr, memory, vcores, resourceTracker, YarnVersionInfo.getVersion());
+  }
+
+  public MockNM(String nodeIdStr, int memory, int vcores,
+      ResourceTrackerService resourceTracker, String version) {
     this.memory = memory;
     this.vCores = vcores;
     this.resourceTracker = resourceTracker;
+    this.version = version;
     String[] splits = nodeIdStr.split(":");
     nodeId = BuilderUtils.newNodeId(splits[0], Integer.parseInt(splits[1]));
   }
@@ -90,20 +100,27 @@ public class MockNM {
   }
 
   public RegisterNodeManagerResponse registerNode() throws Exception {
+    return registerNode(null);
+  }
+
+  public RegisterNodeManagerResponse registerNode(
+      List<ContainerStatus> containerStatus) throws Exception{
     RegisterNodeManagerRequest req = Records.newRecord(
         RegisterNodeManagerRequest.class);
     req.setNodeId(nodeId);
     req.setHttpPort(httpPort);
     Resource resource = BuilderUtils.newResource(memory, vCores);
     req.setResource(resource);
+    req.setContainerStatuses(containerStatus);
+    req.setNMVersion(version);
     RegisterNodeManagerResponse registrationResponse =
         resourceTracker.registerNodeManager(req);
     this.currentContainerTokenMasterKey =
         registrationResponse.getContainerTokenMasterKey();
     this.currentNMTokenMasterKey = registrationResponse.getNMTokenMasterKey();
-    return registrationResponse;
+    return registrationResponse;    
   }
-
+  
   public NodeHeartbeatResponse nodeHeartbeat(boolean isHealthy) throws Exception {
     return nodeHeartbeat(new HashMap<ApplicationId, List<ContainerStatus>>(),
         isHealthy, ++responseId);

@@ -22,20 +22,20 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppUtils;
 import org.apache.hadoop.yarn.util.resource.Resources;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
 
 @Private
 @Unstable
@@ -43,49 +43,80 @@ public class FSLeafQueue extends FSQueue {
   private static final Log LOG = LogFactory.getLog(
       FSLeafQueue.class.getName());
     
-  private final List<AppSchedulable> appScheds = 
+  private final List<AppSchedulable> runnableAppScheds = // apps that are runnable
+      new ArrayList<AppSchedulable>();
+  private final List<AppSchedulable> nonRunnableAppScheds =
       new ArrayList<AppSchedulable>();
   
-  private final FairScheduler scheduler;
-  private final QueueManager queueMgr;
   private Resource demand = Resources.createResource(0);
   
   // Variables used for preemption
   private long lastTimeAtMinShare;
   private long lastTimeAtHalfFairShare;
   
-  public FSLeafQueue(String name, QueueManager queueMgr, FairScheduler scheduler,
+  public FSLeafQueue(String name, FairScheduler scheduler,
       FSParentQueue parent) {
-    super(name, queueMgr, scheduler, parent);
-    this.scheduler = scheduler;
-    this.queueMgr = queueMgr;
+    super(name, scheduler, parent);
     this.lastTimeAtMinShare = scheduler.getClock().getTime();
     this.lastTimeAtHalfFairShare = scheduler.getClock().getTime();
   }
   
-  public void addApp(FSSchedulerApp app) {
+  public void addApp(FSSchedulerApp app, boolean runnable) {
     AppSchedulable appSchedulable = new AppSchedulable(scheduler, app, this);
     app.setAppSchedulable(appSchedulable);
-    appScheds.add(appSchedulable);
+    if (runnable) {
+      runnableAppScheds.add(appSchedulable);
+    } else {
+      nonRunnableAppScheds.add(appSchedulable);
+    }
   }
   
   // for testing
   void addAppSchedulable(AppSchedulable appSched) {
-    appScheds.add(appSched);
+    runnableAppScheds.add(appSched);
   }
   
-  public void removeApp(FSSchedulerApp app) {
-    for (Iterator<AppSchedulable> it = appScheds.iterator(); it.hasNext();) {
-      AppSchedulable appSched = it.next();
-      if (appSched.getApp() == app) {
-        it.remove();
-        break;
-      }
+  /**
+   * Removes the given app from this queue.
+   * @return whether or not the app was runnable
+   */
+  public boolean removeApp(FSSchedulerApp app) {
+    if (runnableAppScheds.remove(app.getAppSchedulable())) {
+      return true;
+    } else if (nonRunnableAppScheds.remove(app.getAppSchedulable())) {
+      return false;
+    } else {
+      throw new IllegalStateException("Given app to remove " + app +
+          " does not exist in queue " + this);
     }
   }
   
-  public Collection<AppSchedulable> getAppSchedulables() {
-    return appScheds;
+  public void makeAppRunnable(AppSchedulable appSched) {
+    if (!nonRunnableAppScheds.remove(appSched)) {
+      throw new IllegalStateException("Can't make app runnable that does not " +
+      		"already exist in queue as non-runnable" + appSched);
+    }
+    
+    runnableAppScheds.add(appSched);
+  }
+  
+  public Collection<AppSchedulable> getRunnableAppSchedulables() {
+    return runnableAppScheds;
+  }
+  
+  public List<AppSchedulable> getNonRunnableAppSchedulables() {
+    return nonRunnableAppScheds;
+  }
+  
+  @Override
+  public void collectSchedulerApplications(
+      Collection<ApplicationAttemptId> apps) {
+    for (AppSchedulable appSched : runnableAppScheds) {
+      apps.add(appSched.getApp().getApplicationAttemptId());
+    }
+    for (AppSchedulable appSched : nonRunnableAppScheds) {
+      apps.add(appSched.getApp().getApplicationAttemptId());
+    }
   }
 
   @Override
@@ -99,7 +130,7 @@ public class FSLeafQueue extends FSQueue {
   
   @Override
   public void recomputeShares() {
-    policy.computeShares(getAppSchedulables(), getFairShare());
+    policy.computeShares(getRunnableAppSchedulables(), getFairShare());
   }
 
   @Override
@@ -110,7 +141,10 @@ public class FSLeafQueue extends FSQueue {
   @Override
   public Resource getResourceUsage() {
     Resource usage = Resources.createResource(0);
-    for (AppSchedulable app : appScheds) {
+    for (AppSchedulable app : runnableAppScheds) {
+      Resources.addTo(usage, app.getResourceUsage());
+    }
+    for (AppSchedulable app : nonRunnableAppScheds) {
       Resources.addTo(usage, app.getResourceUsage());
     }
     return usage;
@@ -120,33 +154,44 @@ public class FSLeafQueue extends FSQueue {
   public void updateDemand() {
     // Compute demand by iterating through apps in the queue
     // Limit demand to maxResources
-    Resource maxRes = queueMgr.getMaxResources(getName());
+    Resource maxRes = scheduler.getAllocationConfiguration()
+        .getMaxResources(getName());
     demand = Resources.createResource(0);
-    for (AppSchedulable sched : appScheds) {
-      sched.updateDemand();
-      Resource toAdd = sched.getDemand();
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Counting resource from " + sched.getName() + " " + toAdd
-            + "; Total resource consumption for " + getName() + " now "
-            + demand);
-      }
-      demand = Resources.add(demand, toAdd);
-      demand = Resources.componentwiseMin(demand, maxRes);
+    for (AppSchedulable sched : runnableAppScheds) {
       if (Resources.equals(demand, maxRes)) {
         break;
       }
+      updateDemandForApp(sched, maxRes);
+    }
+    for (AppSchedulable sched : nonRunnableAppScheds) {
+      if (Resources.equals(demand, maxRes)) {
+        break;
+      }
+      updateDemandForApp(sched, maxRes);
     }
     if (LOG.isDebugEnabled()) {
       LOG.debug("The updated demand for " + getName() + " is " + demand
           + "; the max is " + maxRes);
     }
   }
+  
+  private void updateDemandForApp(AppSchedulable sched, Resource maxRes) {
+    sched.updateDemand();
+    Resource toAdd = sched.getDemand();
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Counting resource from " + sched.getName() + " " + toAdd
+          + "; Total resource consumption for " + getName() + " now "
+          + demand);
+    }
+    demand = Resources.add(demand, toAdd);
+    demand = Resources.componentwiseMin(demand, maxRes);
+  }
 
   @Override
   public Resource assignContainer(FSSchedulerNode node) {
     Resource assigned = Resources.none();
     if (LOG.isDebugEnabled()) {
-      LOG.debug("Node offered to queue: " + getName());
+      LOG.debug("Node " + node.getNodeName() + " offered to queue: " + getName());
     }
 
     if (!assignContainerPreCheck(node)) {
@@ -154,13 +199,15 @@ public class FSLeafQueue extends FSQueue {
     }
 
     Comparator<Schedulable> comparator = policy.getComparator();
-    Collections.sort(appScheds, comparator);
-    for (AppSchedulable sched : appScheds) {
-      if (sched.getRunnable()) {
-        assigned = sched.assignContainer(node);
-        if (!assigned.equals(Resources.none())) {
-          break;
-        }
+    Collections.sort(runnableAppScheds, comparator);
+    for (AppSchedulable sched : runnableAppScheds) {
+      if (SchedulerAppUtils.isBlacklisted(sched.getApp(), node, LOG)) {
+        continue;
+      }
+
+      assigned = sched.assignContainer(node);
+      if (!assigned.equals(Resources.none())) {
+        break;
       }
     }
     return assigned;
@@ -177,8 +224,7 @@ public class FSLeafQueue extends FSQueue {
       recordFactory.newRecordInstance(QueueUserACLInfo.class);
     List<QueueACL> operations = new ArrayList<QueueACL>();
     for (QueueACL operation : QueueACL.values()) {
-      Map<QueueACL, AccessControlList> acls = queueMgr.getQueueAcls(getName());
-      if (acls.get(operation).isUserAllowed(user)) {
+      if (hasAccess(operation, user)) {
         operations.add(operation);
       }
     }
@@ -202,5 +248,10 @@ public class FSLeafQueue extends FSQueue {
 
   public void setLastTimeAtHalfFairShare(long lastTimeAtHalfFairShare) {
     this.lastTimeAtHalfFairShare = lastTimeAtHalfFairShare;
+  }
+
+  @Override
+  public int getNumRunnableApps() {
+    return runnableAppScheds.size();
   }
 }

@@ -21,6 +21,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -37,6 +38,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
@@ -65,18 +67,9 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEven
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeCleanContainerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.UpdatedContainerInfo;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ActiveUsersManager;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppReport;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.*;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ContainerExpiredSchedulerEvent;
@@ -108,7 +101,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
   private final static List<Container> EMPTY_CONTAINER_LIST = Arrays.asList(EMPTY_CONTAINER_ARRAY);
   private RMContext rmContext;
 
-  private Map<NodeId, FiCaSchedulerNode> nodes = new ConcurrentHashMap<NodeId, FiCaSchedulerNode>();
+  protected Map<NodeId, FiCaSchedulerNode> nodes = new ConcurrentHashMap<NodeId, FiCaSchedulerNode>();
 
   private boolean initialized;
   private Resource minimumAllocation;
@@ -156,7 +149,6 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
       return queueInfo;
     }
 
-    @Override
     public Map<QueueACL, AccessControlList> getQueueAcls() {
       Map<QueueACL, AccessControlList> acls =
         new HashMap<QueueACL, AccessControlList>();
@@ -174,6 +166,11 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
       queueUserAclInfo.setQueueName(DEFAULT_QUEUE_NAME);
       queueUserAclInfo.setUserAcls(Arrays.asList(QueueACL.values()));
       return Collections.singletonList(queueUserAclInfo);
+    }
+
+    @Override
+    public boolean hasAccess(QueueACL acl, UserGroupInformation user) {
+      return getQueueAcls().get(acl).isUserAllowed(user);
     }
   };
 
@@ -299,7 +296,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
         application.showRequests();
 
         // Update application requests
-        application.updateResourceRequests(ask, blacklistAdditions, blacklistRemovals);
+        application.updateResourceRequests(ask);
 
         LOG.debug("allocate: post-update" +
             " applicationId=" + applicationAttemptId + 
@@ -311,13 +308,16 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
             " #ask=" + ask.size());
       }
 
+      application.updateBlacklist(blacklistAdditions, blacklistRemovals);
+
       return new Allocation(
           application.pullNewlyAllocatedContainers(), 
           application.getHeadroom());
     }
   }
 
-  private FiCaSchedulerApp getApplication(
+  @VisibleForTesting
+  FiCaSchedulerApp getApplication(
       ApplicationAttemptId applicationAttemptId) {
     return applications.get(applicationAttemptId);
   }
@@ -327,6 +327,13 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
       ApplicationAttemptId applicationAttemptId) {
     FiCaSchedulerApp app = getApplication(applicationAttemptId);
     return app == null ? null : new SchedulerAppReport(app);
+  }
+  
+  @Override
+  public ApplicationResourceUsageReport getAppResourceUsageReport(
+      ApplicationAttemptId applicationAttemptId) {
+    FiCaSchedulerApp app = getApplication(applicationAttemptId);
+    return app == null ? null : app.getResourceUsageReport();
   }
   
   private FiCaSchedulerNode getNode(NodeId nodeId) {
@@ -398,7 +405,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
       application.showRequests();
       synchronized (application) {
         // Check if this resource is on the blacklist
-        if (FiCaSchedulerUtils.isBlacklisted(application, node, LOG)) {
+        if (SchedulerAppUtils.isBlacklisted(application, node, LOG)) {
           continue;
         }
         
@@ -622,6 +629,9 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
   private synchronized void nodeUpdate(RMNode rmNode) {
     FiCaSchedulerNode node = getNode(rmNode.getNodeID());
     
+    // Update resource if any change
+    SchedulerUtils.updateResourceIfChanged(node, rmNode, clusterResource, LOG);
+    
     List<UpdatedContainerInfo> containerInfoList = rmNode.pullContainerUpdates();
     List<ContainerStatus> newlyLaunchedContainers = new ArrayList<ContainerStatus>();
     List<ContainerStatus> completedContainers = new ArrayList<ContainerStatus>();
@@ -655,7 +665,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
     
     metrics.setAvailableResourcesToQueue(
         Resources.subtract(clusterResource, usedResource));
-  }  
+  }
 
   @Override
   public void handle(SchedulerEvent event) {
@@ -834,6 +844,26 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
   @Override
   public QueueMetrics getRootQueueMetrics() {
     return DEFAULT_QUEUE.getMetrics();
+  }
+
+  @Override
+  public synchronized boolean checkAccess(UserGroupInformation callerUGI,
+      QueueACL acl, String queueName) {
+    return DEFAULT_QUEUE.hasAccess(acl, callerUGI);
+  }
+  
+  @Override
+  public synchronized List<ApplicationAttemptId> getAppsInQueue(String queueName) {
+    if (queueName.equals(DEFAULT_QUEUE.getQueueName())) {
+      List<ApplicationAttemptId> apps = new ArrayList<ApplicationAttemptId>(
+          applications.size());
+      for (FiCaSchedulerApp app : applications.values()) {
+        apps.add(app.getApplicationAttemptId());
+      }
+      return apps;
+    } else {
+      return null;
+    }
   }
 
 }

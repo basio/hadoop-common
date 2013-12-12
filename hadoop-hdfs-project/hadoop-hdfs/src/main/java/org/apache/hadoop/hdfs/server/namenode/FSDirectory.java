@@ -53,6 +53,7 @@ import org.apache.hadoop.hdfs.protocol.FSLimitException.PathComponentTooLongExce
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.HdfsLocatedFileStatus;
+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.SnapshotAccessControlException;
@@ -61,6 +62,7 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference.WithCount;
@@ -85,11 +87,15 @@ import com.google.common.base.Preconditions;
  * 
  *************************************************/
 public class FSDirectory implements Closeable {
-  private static INodeDirectoryWithQuota createRoot(FSNamesystem namesystem) {
-    final INodeDirectoryWithQuota r = new INodeDirectoryWithQuota(
+  private static INodeDirectorySnapshottable createRoot(FSNamesystem namesystem) {
+    final INodeDirectory r = new INodeDirectory(
         INodeId.ROOT_INODE_ID,
         INodeDirectory.ROOT_NAME,
-        namesystem.createFsOwnerPermissions(new FsPermission((short) 0755)));
+        namesystem.createFsOwnerPermissions(new FsPermission((short) 0755)),
+        0L);
+    r.addDirectoryWithQuotaFeature(
+        DirectoryWithQuotaFeature.DEFAULT_NAMESPACE_QUOTA,
+        DirectoryWithQuotaFeature.DEFAULT_DISKSPACE_QUOTA);
     final INodeDirectorySnapshottable s = new INodeDirectorySnapshottable(r);
     s.setSnapshotQuota(0);
     return s;
@@ -105,14 +111,16 @@ public class FSDirectory implements Closeable {
   public final static String DOT_INODES_STRING = ".inodes";
   public final static byte[] DOT_INODES = 
       DFSUtil.string2Bytes(DOT_INODES_STRING);
-  INodeDirectoryWithQuota rootDir;
+  INodeDirectory rootDir;
   FSImage fsImage;  
   private final FSNamesystem namesystem;
   private volatile boolean ready = false;
   private final int maxComponentLength;
   private final int maxDirItems;
   private final int lsLimit;  // max list limit
+  private final int contentCountLimit; // max content summary counts per run
   private final INodeMap inodeMap; // Synchronized by dirLock
+  private long yieldCount = 0; // keep track of lock yield count.
 
   // lock to protect the directory and BlockMap
   private ReentrantReadWriteLock dirLock;
@@ -143,6 +151,14 @@ public class FSDirectory implements Closeable {
     return this.dirLock.getReadHoldCount() > 0;
   }
 
+  public int getReadHoldCount() {
+    return this.dirLock.getReadHoldCount();
+  }
+
+  public int getWriteHoldCount() {
+    return this.dirLock.getWriteHoldCount();
+  }
+
   /**
    * Caches frequently used file names used in {@link INode} to reuse 
    * byte[] objects and reduce heap usage.
@@ -159,6 +175,10 @@ public class FSDirectory implements Closeable {
         DFSConfigKeys.DFS_LIST_LIMIT, DFSConfigKeys.DFS_LIST_LIMIT_DEFAULT);
     this.lsLimit = configuredLimit>0 ?
         configuredLimit : DFSConfigKeys.DFS_LIST_LIMIT_DEFAULT;
+
+    this.contentCountLimit = conf.getInt(
+        DFSConfigKeys.DFS_CONTENT_SUMMARY_LIMIT_KEY,
+        DFSConfigKeys.DFS_CONTENT_SUMMARY_LIMIT_DEFAULT);
     
     // filesystem limits
     this.maxComponentLength = conf.getInt(
@@ -186,7 +206,7 @@ public class FSDirectory implements Closeable {
   }
 
   /** @return the root directory inode. */
-  public INodeDirectoryWithQuota getRoot() {
+  public INodeDirectory getRoot() {
     return rootDir;
   }
 
@@ -261,13 +281,9 @@ public class FSDirectory implements Closeable {
    * @throws UnresolvedLinkException
    * @throws SnapshotAccessControlException 
    */
-  INodeFileUnderConstruction addFile(String path, 
-                PermissionStatus permissions,
-                short replication,
-                long preferredBlockSize,
-                String clientName,
-                String clientMachine,
-                DatanodeDescriptor clientNode)
+  INodeFile addFile(String path, PermissionStatus permissions,
+      short replication, long preferredBlockSize, String clientName,
+      String clientMachine, DatanodeDescriptor clientNode)
     throws FileAlreadyExistsException, QuotaExceededException,
       UnresolvedLinkException, SnapshotAccessControlException {
     waitForReady();
@@ -285,11 +301,11 @@ public class FSDirectory implements Closeable {
     if (!mkdirs(parent.toString(), permissions, true, modTime)) {
       return null;
     }
-    INodeFileUnderConstruction newNode = new INodeFileUnderConstruction(
-                                 namesystem.allocateNewInodeId(),
-                                 permissions,replication,
-                                 preferredBlockSize, modTime, clientName, 
-                                 clientMachine, clientNode);
+    INodeFile newNode = new INodeFile(namesystem.allocateNewInodeId(), null,
+        permissions, modTime, modTime, BlockInfo.EMPTY_ARRAY, replication,
+        preferredBlockSize);
+    newNode.toUnderConstruction(clientName, clientMachine, clientNode);
+
     boolean added = false;
     writeLock();
     try {
@@ -321,8 +337,11 @@ public class FSDirectory implements Closeable {
     final INodeFile newNode;
     assert hasWriteLock();
     if (underConstruction) {
-      newNode = new INodeFileUnderConstruction(id, permissions, replication,
-          preferredBlockSize, modificationTime, clientName, clientMachine, null);
+      newNode = new INodeFile(id, null, permissions, modificationTime,
+          modificationTime, BlockInfo.EMPTY_ARRAY, replication,
+          preferredBlockSize);
+      newNode.toUnderConstruction(clientName, clientMachine, null);
+
     } else {
       newNode = new INodeFile(id, null, permissions, modificationTime, atime,
           BlockInfo.EMPTY_ARRAY, replication, preferredBlockSize);
@@ -346,13 +365,13 @@ public class FSDirectory implements Closeable {
    * Add a block to the file. Returns a reference to the added block.
    */
   BlockInfo addBlock(String path, INodesInPath inodesInPath, Block block,
-      DatanodeDescriptor targets[]) throws IOException {
+      DatanodeStorageInfo[] targets) throws IOException {
     waitForReady();
 
     writeLock();
     try {
-      final INodeFileUnderConstruction fileINode = 
-          INodeFileUnderConstruction.valueOf(inodesInPath.getLastINode(), path);
+      final INodeFile fileINode = inodesInPath.getLastINode().asFile();
+      Preconditions.checkState(fileINode.isUnderConstruction());
 
       // check quota limits and updated space consumed
       updateCount(inodesInPath, 0, fileINode.getBlockDiskspace(), true);
@@ -382,8 +401,8 @@ public class FSDirectory implements Closeable {
   /**
    * Persist the block list for the inode.
    */
-  void persistBlocks(String path, INodeFileUnderConstruction file,
-      boolean logRetryCache) {
+  void persistBlocks(String path, INodeFile file, boolean logRetryCache) {
+    Preconditions.checkArgument(file.isUnderConstruction());
     waitForReady();
 
     writeLock();
@@ -422,8 +441,9 @@ public class FSDirectory implements Closeable {
    * Remove a block from the file.
    * @return Whether the block exists in the corresponding file
    */
-  boolean removeBlock(String path, INodeFileUnderConstruction fileNode,
-                      Block block) throws IOException {
+  boolean removeBlock(String path, INodeFile fileNode, Block block)
+      throws IOException {
+    Preconditions.checkArgument(fileNode.isUnderConstruction());
     waitForReady();
 
     writeLock();
@@ -435,8 +455,9 @@ public class FSDirectory implements Closeable {
   }
   
   boolean unprotectedRemoveBlock(String path,
-      INodeFileUnderConstruction fileNode, Block block) throws IOException {
+      INodeFile fileNode, Block block) throws IOException {
     // modify file-> block and blocksMap
+    // fileNode should be under construction
     boolean removed = fileNode.removeLastBlock(block);
     if (!removed) {
       return false;
@@ -1463,38 +1484,6 @@ public class FSDirectory implements Closeable {
   }
 
   /**
-   * Replaces the specified INodeFile with the specified one.
-   */
-  void replaceINodeFile(String path, INodeFile oldnode,
-      INodeFile newnode) throws IOException {
-    writeLock();
-    try {
-      unprotectedReplaceINodeFile(path, oldnode, newnode);
-    } finally {
-      writeUnlock();
-    }
-  }
-
-  /** Replace an INodeFile and record modification for the latest snapshot. */
-  void unprotectedReplaceINodeFile(final String path, final INodeFile oldnode,
-      final INodeFile newnode) {
-    Preconditions.checkState(hasWriteLock());
-
-    oldnode.getParent().replaceChild(oldnode, newnode, inodeMap);
-    oldnode.clear();
-
-    /* Currently oldnode and newnode are assumed to contain the same
-     * blocks. Otherwise, blocks need to be removed from the blocksMap.
-     */
-    int index = 0;
-    for (BlockInfo b : newnode.getBlocks()) {
-      BlockInfo info = getBlockManager().addBlockCollection(b, newnode);
-      newnode.setBlock(index, info); // inode refers to the block in BlocksMap
-      index++;
-    }
-  }
-
-  /**
    * Get a partial listing of the indicated directory
    *
    * @param src the directory name
@@ -1815,9 +1804,8 @@ public class FSDirectory implements Closeable {
     final INode[] inodes = inodesInPath.getINodes();
     for(int i=0; i < numOfINodes; i++) {
       if (inodes[i].isQuotaSet()) { // a directory with quota
-        INodeDirectoryWithQuota node = (INodeDirectoryWithQuota) inodes[i]
-            .asDirectory(); 
-        node.addSpaceConsumed2Cache(nsDelta, dsDelta);
+        inodes[i].asDirectory().getDirectoryWithQuotaFeature()
+            .addSpaceConsumed2Cache(nsDelta, dsDelta);
       }
     }
   }
@@ -2050,10 +2038,11 @@ public class FSDirectory implements Closeable {
         // Stop checking for quota when common ancestor is reached
         return;
       }
-      if (inodes[i].isQuotaSet()) { // a directory with quota
+      final DirectoryWithQuotaFeature q
+          = inodes[i].asDirectory().getDirectoryWithQuotaFeature();
+      if (q != null) { // a directory with quota
         try {
-          ((INodeDirectoryWithQuota) inodes[i].asDirectory()).verifyQuota(
-              nsDelta, dsDelta);
+          q.verifyQuota(nsDelta, dsDelta);
         } catch (QuotaExceededException e) {
           e.setPathName(getFullPathName(inodes, i));
           throw e;
@@ -2294,11 +2283,24 @@ public class FSDirectory implements Closeable {
         throw new FileNotFoundException("File does not exist: " + srcs);
       }
       else {
-        return targetNode.computeContentSummary();
+        // Make it relinquish locks everytime contentCountLimit entries are
+        // processed. 0 means disabled. I.e. blocking for the entire duration.
+        ContentSummaryComputationContext cscc =
+
+            new ContentSummaryComputationContext(this, getFSNamesystem(),
+            contentCountLimit);
+        ContentSummary cs = targetNode.computeAndConvertContentSummary(cscc);
+        yieldCount += cscc.getYieldCount();
+        return cs;
       }
     } finally {
       readUnlock();
     }
+  }
+
+  @VisibleForTesting
+  public long getYieldCount() {
+    return yieldCount;
   }
 
   public INodeMap getINodeMap() {
@@ -2378,43 +2380,23 @@ public class FSDirectory implements Closeable {
     if (dirNode.isRoot() && nsQuota == HdfsConstants.QUOTA_RESET) {
       throw new IllegalArgumentException("Cannot clear namespace quota on root.");
     } else { // a directory inode
-      long oldNsQuota = dirNode.getNsQuota();
-      long oldDsQuota = dirNode.getDsQuota();
+      final Quota.Counts oldQuota = dirNode.getQuotaCounts();
+      final long oldNsQuota = oldQuota.get(Quota.NAMESPACE);
+      final long oldDsQuota = oldQuota.get(Quota.DISKSPACE);
       if (nsQuota == HdfsConstants.QUOTA_DONT_SET) {
         nsQuota = oldNsQuota;
       }
       if (dsQuota == HdfsConstants.QUOTA_DONT_SET) {
         dsQuota = oldDsQuota;
       }        
+      if (oldNsQuota == nsQuota && oldDsQuota == dsQuota) {
+        return null;
+      }
 
       final Snapshot latest = iip.getLatestSnapshot();
-      if (dirNode instanceof INodeDirectoryWithQuota) {
-        INodeDirectoryWithQuota quotaNode = (INodeDirectoryWithQuota) dirNode;
-        Quota.Counts counts = null;
-        if (!quotaNode.isQuotaSet()) {
-          // dirNode must be an INodeDirectoryWithSnapshot whose quota has not
-          // been set yet
-          counts = quotaNode.computeQuotaUsage();
-        }
-        // a directory with quota; so set the quota to the new value
-        quotaNode.setQuota(nsQuota, dsQuota);
-        if (quotaNode.isQuotaSet() && counts != null) {
-          quotaNode.setSpaceConsumed(counts.get(Quota.NAMESPACE),
-              counts.get(Quota.DISKSPACE));
-        } else if (!quotaNode.isQuotaSet() && latest == null) {
-          // do not replace the node if the node is a snapshottable directory
-          // without snapshots
-          if (!(quotaNode instanceof INodeDirectoryWithSnapshot)) {
-            // will not come here for root because root is snapshottable and
-            // root's nsQuota is always set
-            return quotaNode.replaceSelf4INodeDirectory(inodeMap);
-          }
-        }
-      } else {
-        // a non-quota directory; so replace it with a directory with quota
-        return dirNode.replaceSelf4Quota(latest, nsQuota, dsQuota, inodeMap);
-      }
-      return (oldNsQuota != nsQuota || oldDsQuota != dsQuota) ? dirNode : null;
+      dirNode = dirNode.recordModification(latest, inodeMap);
+      dirNode.setQuota(nsQuota, dsQuota);
+      return dirNode;
     }
   }
   
@@ -2431,8 +2413,9 @@ public class FSDirectory implements Closeable {
     try {
       INodeDirectory dir = unprotectedSetQuota(src, nsQuota, dsQuota);
       if (dir != null) {
-        fsImage.getEditLog().logSetQuota(src, dir.getNsQuota(), 
-                                         dir.getDsQuota());
+        final Quota.Counts q = dir.getQuotaCounts();
+        fsImage.getEditLog().logSetQuota(src,
+            q.get(Quota.NAMESPACE), q.get(Quota.DISKSPACE));
       }
     } finally {
       writeUnlock();
@@ -2442,7 +2425,8 @@ public class FSDirectory implements Closeable {
   long totalInodes() {
     readLock();
     try {
-      return rootDir.numItemsInTree();
+      return rootDir.getDirectoryWithQuotaFeature().getSpaceConsumed()
+          .get(Quota.NAMESPACE);
     } finally {
       readUnlock();
     }
@@ -2592,12 +2576,21 @@ public class FSDirectory implements Closeable {
     int childrenNum = node.isDirectory() ? 
         node.asDirectory().getChildrenNum(snapshot) : 0;
         
-    return new HdfsLocatedFileStatus(size, node.isDirectory(), replication,
-        blocksize, node.getModificationTime(snapshot),
-        node.getAccessTime(snapshot), node.getFsPermission(snapshot),
-        node.getUserName(snapshot), node.getGroupName(snapshot),
-        node.isSymlink() ? node.asSymlink().getSymlink() : null, path,
-        node.getId(), loc, childrenNum);
+    HdfsLocatedFileStatus status =
+        new HdfsLocatedFileStatus(size, node.isDirectory(), replication,
+          blocksize, node.getModificationTime(snapshot),
+          node.getAccessTime(snapshot), node.getFsPermission(snapshot),
+          node.getUserName(snapshot), node.getGroupName(snapshot),
+          node.isSymlink() ? node.asSymlink().getSymlink() : null, path,
+          node.getId(), loc, childrenNum);
+    // Set caching information for the located blocks.
+    if (loc != null) {
+      CacheManager cacheManager = namesystem.getCacheManager();
+      for (LocatedBlock lb: loc.getLocatedBlocks()) {
+        cacheManager.setCachedLocations(lb);
+      }
+    }
+    return status;
   }
 
     

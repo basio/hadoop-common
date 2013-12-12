@@ -86,6 +86,9 @@ public class TestQuota {
     // Space quotas
     final int DEFAULT_BLOCK_SIZE = 512;
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, DEFAULT_BLOCK_SIZE);
+    // Make it relinquish locks. When run serially, the result should
+    // be identical.
+    conf.setInt(DFSConfigKeys.DFS_CONTENT_SUMMARY_LIMIT_KEY, 2);
     final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
     final FileSystem fs = cluster.getFileSystem();
     assertTrue("Not a HDFS: "+fs.getUri(),
@@ -350,6 +353,7 @@ public class TestQuota {
       }
       assertTrue(hasException);
 
+      assertEquals(4, cluster.getNamesystem().getFSDirectory().getYieldCount());
     } finally {
       cluster.shutdown();
     }
@@ -360,11 +364,11 @@ public class TestQuota {
   @Test
   public void testNamespaceCommands() throws Exception {
     final Configuration conf = new HdfsConfiguration();
+    // Make it relinquish locks. When run serially, the result should
+    // be identical.
+    conf.setInt(DFSConfigKeys.DFS_CONTENT_SUMMARY_LIMIT_KEY, 2);
     final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
-    final FileSystem fs = cluster.getFileSystem();
-    assertTrue("Not a HDFS: "+fs.getUri(),
-                fs instanceof DistributedFileSystem);
-    final DistributedFileSystem dfs = (DistributedFileSystem)fs;
+    final DistributedFileSystem dfs = cluster.getFileSystem();
     
     try {
       // 1: create directory /nqdir0/qdir1/qdir20/nqdir30
@@ -515,6 +519,7 @@ public class TestQuota {
       c = dfs.getContentSummary(quotaDir1);
       assertEquals(c.getDirectoryCount(), 6);
       assertEquals(c.getQuota(), 6);
+      assertEquals(14, cluster.getNamesystem().getFSDirectory().getYieldCount());
     } finally {
       cluster.shutdown();
     }
@@ -532,6 +537,9 @@ public class TestQuota {
     // set a smaller block size so that we can test with smaller 
     // diskspace quotas
     conf.set(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, "512");
+    // Make it relinquish locks. When run serially, the result should
+    // be identical.
+    conf.setInt(DFSConfigKeys.DFS_CONTENT_SUMMARY_LIMIT_KEY, 2);
     final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
     final FileSystem fs = cluster.getFileSystem();
     assertTrue("Not a HDFS: "+fs.getUri(),
@@ -764,6 +772,7 @@ public class TestQuota {
       assertEquals(c.getSpaceConsumed(),
           (sizeFactorA + sizeFactorB + sizeFactorC) * fileSpace);
 
+      assertEquals(20, cluster.getNamesystem().getFSDirectory().getYieldCount());
     } finally {
       cluster.shutdown();
     }
@@ -905,6 +914,9 @@ public class TestQuota {
     final int BLOCK_SIZE = 6 * 1024;
     conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
     conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
+    // Make it relinquish locks. When run serially, the result should
+    // be identical.
+    conf.setInt(DFSConfigKeys.DFS_CONTENT_SUMMARY_LIMIT_KEY, 2);
     MiniDFSCluster cluster = 
       new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
     cluster.waitActive();
@@ -971,6 +983,7 @@ public class TestQuota {
         exceededQuota = true;
       }
       assertTrue("Quota not exceeded", exceededQuota);
+      assertEquals(2, cluster.getNamesystem().getFSDirectory().getYieldCount());
     } finally {
       cluster.shutdown();
     }

@@ -48,6 +48,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo.FifoScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
 import org.apache.hadoop.yarn.webapp.WebServicesTestUtils;
@@ -77,6 +78,8 @@ import com.sun.jersey.test.framework.WebAppDescriptor;
 public class TestRMWebServicesApps extends JerseyTest {
 
   private static MockRM rm;
+  
+  private static final int CONTAINER_MB = 1024;
 
   private Injector injector = Guice.createInjector(new ServletModule() {
     @Override
@@ -94,6 +97,7 @@ public class TestRMWebServicesApps extends JerseyTest {
       bind(RMContext.class).toInstance(rm.getRMContext());
       bind(ApplicationACLsManager.class).toInstance(
           rm.getApplicationACLsManager());
+      bind(QueueACLsManager.class).toInstance(rm.getQueueACLsManager());
       serve("/*").with(GuiceContainer.class);
     }
   });
@@ -124,7 +128,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testApps() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     testAppsHelper("apps", app1, MediaType.APPLICATION_JSON);
     rm.stop();
@@ -134,7 +138,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsSlash() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     testAppsHelper("apps/", app1, MediaType.APPLICATION_JSON);
     rm.stop();
@@ -144,7 +148,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsDefault() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     testAppsHelper("apps/", app1, "");
     rm.stop();
@@ -154,7 +158,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsXML() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024, "testwordcount", "user1");
+    RMApp app1 = rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
@@ -179,7 +183,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsXMLMulti() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024, "testwordcount", "user1");
+    rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     rm.submitApp(2048, "testwordcount2", "user1");
 
     amNodeManager.nodeHeartbeat(true);
@@ -223,7 +227,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryState() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -246,8 +250,8 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryStates() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
-    RMApp killedApp = rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    RMApp killedApp = rm.submitApp(CONTAINER_MB);
     rm.killApp(killedApp.getApplicationId());
 
     amNodeManager.nodeHeartbeat(true);
@@ -295,8 +299,8 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryStatesComma() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
-    RMApp killedApp = rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    RMApp killedApp = rm.submitApp(CONTAINER_MB);
     rm.killApp(killedApp.getApplicationId());
 
     amNodeManager.nodeHeartbeat(true);
@@ -344,7 +348,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryStatesNone() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -363,7 +367,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryStateNone() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -382,7 +386,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryStatesInvalid() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -419,7 +423,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryStateInvalid() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -456,7 +460,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryFinalStatus() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -479,7 +483,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryFinalStatusNone() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -497,7 +501,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryFinalStatusInvalid() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -535,8 +539,8 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryUser() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
 
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
@@ -563,8 +567,8 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryQueue() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
 
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
@@ -586,9 +590,9 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryLimit() throws JSONException, Exception {
     rm.start();
     rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("apps").queryParam("limit", "2")
@@ -609,9 +613,9 @@ public class TestRMWebServicesApps extends JerseyTest {
     long start = System.currentTimeMillis();
     Thread.sleep(1);
     rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("apps").queryParam("startedTimeBegin", String.valueOf(start))
@@ -630,11 +634,11 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryStartBeginSome() throws JSONException, Exception {
     rm.start();
     rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
     long start = System.currentTimeMillis();
     Thread.sleep(1);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("apps").queryParam("startedTimeBegin", String.valueOf(start))
@@ -655,9 +659,9 @@ public class TestRMWebServicesApps extends JerseyTest {
     rm.registerNode("127.0.0.1:1234", 2048);
     long end = System.currentTimeMillis();
     Thread.sleep(1);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("apps").queryParam("startedTimeEnd", String.valueOf(end))
@@ -675,11 +679,11 @@ public class TestRMWebServicesApps extends JerseyTest {
     rm.registerNode("127.0.0.1:1234", 2048);
     long start = System.currentTimeMillis();
     Thread.sleep(1);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
     long end = System.currentTimeMillis();
     Thread.sleep(1);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
         .path("apps").queryParam("startedTimeBegin", String.valueOf(start))
@@ -701,7 +705,7 @@ public class TestRMWebServicesApps extends JerseyTest {
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
     long start = System.currentTimeMillis();
     Thread.sleep(1);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     // finish App
     MockAM am = rm
@@ -710,8 +714,8 @@ public class TestRMWebServicesApps extends JerseyTest {
     am.unregisterAppAttempt();
     amNodeManager.nodeHeartbeat(app1.getCurrentAppAttempt().getAppAttemptId(),
         1, ContainerState.COMPLETE);
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
 
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
@@ -731,7 +735,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppsQueryFinishEnd() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     // finish App
     MockAM am = rm
@@ -741,8 +745,8 @@ public class TestRMWebServicesApps extends JerseyTest {
     amNodeManager.nodeHeartbeat(app1.getCurrentAppAttempt().getAppAttemptId(),
         1, ContainerState.COMPLETE);
 
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
     long end = System.currentTimeMillis();
 
     WebResource r = resource();
@@ -765,7 +769,7 @@ public class TestRMWebServicesApps extends JerseyTest {
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
     long start = System.currentTimeMillis();
     Thread.sleep(1);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     // finish App
     MockAM am = rm
@@ -775,8 +779,8 @@ public class TestRMWebServicesApps extends JerseyTest {
     amNodeManager.nodeHeartbeat(app1.getCurrentAppAttempt().getAppAttemptId(),
         1, ContainerState.COMPLETE);
 
-    rm.submitApp(1024);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
+    rm.submitApp(CONTAINER_MB);
     long end = System.currentTimeMillis();
 
     WebResource r = resource();
@@ -799,7 +803,7 @@ public class TestRMWebServicesApps extends JerseyTest {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
     Thread.sleep(1);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     // finish App
     MockAM am = rm
@@ -809,9 +813,9 @@ public class TestRMWebServicesApps extends JerseyTest {
     amNodeManager.nodeHeartbeat(app1.getCurrentAppAttempt().getAppAttemptId(),
         1, ContainerState.COMPLETE);
 
-    rm.submitApp(1024, "", UserGroupInformation.getCurrentUser()
+    rm.submitApp(CONTAINER_MB, "", UserGroupInformation.getCurrentUser()
         .getShortUserName(), null, false, null, 2, null, "MAPREDUCE");
-    rm.submitApp(1024, "", UserGroupInformation.getCurrentUser()
+    rm.submitApp(CONTAINER_MB, "", UserGroupInformation.getCurrentUser()
         .getShortUserName(), null, false, null, 2, null, "NON-YARN");
 
     WebResource r = resource();
@@ -985,7 +989,7 @@ public class TestRMWebServicesApps extends JerseyTest {
       rm.start();
       MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 4096);
       Thread.sleep(1);
-      RMApp app1 = rm.submitApp(1024, "", UserGroupInformation.getCurrentUser()
+      RMApp app1 = rm.submitApp(CONTAINER_MB, "", UserGroupInformation.getCurrentUser()
           .getShortUserName(), null, false, null, 2, null, "MAPREDUCE");
       amNodeManager.nodeHeartbeat(true);
       // finish App
@@ -996,9 +1000,9 @@ public class TestRMWebServicesApps extends JerseyTest {
       amNodeManager.nodeHeartbeat(app1.getCurrentAppAttempt().getAppAttemptId(),
           1, ContainerState.COMPLETE);
 
-      rm.submitApp(1024, "", UserGroupInformation.getCurrentUser()
+      rm.submitApp(CONTAINER_MB, "", UserGroupInformation.getCurrentUser()
           .getShortUserName(), null, false, null, 2, null, "MAPREDUCE");
-      rm.submitApp(1024, "", UserGroupInformation.getCurrentUser()
+      rm.submitApp(CONTAINER_MB, "", UserGroupInformation.getCurrentUser()
           .getShortUserName(), null, false, null, 2, null, "OTHER");
 
       // zero type, zero state
@@ -1146,7 +1150,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testSingleApp() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024, "testwordcount", "user1");
+    RMApp app1 = rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     amNodeManager.nodeHeartbeat(true);
     testSingleAppsHelper(app1.getApplicationId().toString(), app1,
         MediaType.APPLICATION_JSON);
@@ -1157,7 +1161,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testSingleAppsSlash() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     testSingleAppsHelper(app1.getApplicationId().toString() + "/", app1,
         MediaType.APPLICATION_JSON);
@@ -1168,7 +1172,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testSingleAppsDefault() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     testSingleAppsHelper(app1.getApplicationId().toString() + "/", app1, "");
     rm.stop();
@@ -1178,7 +1182,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testInvalidApp() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -1214,7 +1218,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testNonexistApp() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024, "testwordcount", "user1");
+    rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -1263,7 +1267,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testSingleAppsXML() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024, "testwordcount", "user1");
+    RMApp app1 = rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")
@@ -1305,7 +1309,10 @@ public class TestRMWebServicesApps extends JerseyTest {
           WebServicesTestUtils.getXmlLong(element, "finishedTime"),
           WebServicesTestUtils.getXmlLong(element, "elapsedTime"),
           WebServicesTestUtils.getXmlString(element, "amHostHttpAddress"),
-          WebServicesTestUtils.getXmlString(element, "amContainerLogs"));
+          WebServicesTestUtils.getXmlString(element, "amContainerLogs"),
+          WebServicesTestUtils.getXmlInt(element, "allocatedMB"),
+          WebServicesTestUtils.getXmlInt(element, "allocatedVCores"),
+          WebServicesTestUtils.getXmlInt(element, "runningContainers"));
     }
   }
 
@@ -1313,7 +1320,7 @@ public class TestRMWebServicesApps extends JerseyTest {
       Exception {
 
     // 15 because trackingUrl not assigned yet
-    assertEquals("incorrect number of elements", 16, info.length());
+    assertEquals("incorrect number of elements", 19, info.length());
 
     verifyAppInfoGeneric(app, info.getString("id"), info.getString("user"),
       info.getString("name"), info.getString("applicationType"), info.getString("queue"),
@@ -1322,14 +1329,16 @@ public class TestRMWebServicesApps extends JerseyTest {
       info.getString("diagnostics"), info.getLong("clusterId"),
       info.getLong("startedTime"), info.getLong("finishedTime"),
       info.getLong("elapsedTime"), info.getString("amHostHttpAddress"),
-      info.getString("amContainerLogs"));
+      info.getString("amContainerLogs"), info.getInt("allocatedMB"),
+      info.getInt("allocatedVCores"), info.getInt("runningContainers"));
   }
 
   public void verifyAppInfoGeneric(RMApp app, String id, String user,
       String name, String applicationType, String queue, String state, String finalStatus,
       float progress, String trackingUI, String diagnostics, long clusterId,
       long startedTime, long finishedTime, long elapsedTime,
-      String amHostHttpAddress, String amContainerLogs) throws JSONException,
+      String amHostHttpAddress, String amContainerLogs, int allocatedMB,
+      int allocatedVCores, int numContainers) throws JSONException,
       Exception {
 
     WebServicesTestUtils.checkStringMatch("id", app.getApplicationId()
@@ -1361,13 +1370,16 @@ public class TestRMWebServicesApps extends JerseyTest {
         amContainerLogs.startsWith("http://"));
     assertTrue("amContainerLogs doesn't contain user info",
         amContainerLogs.endsWith("/" + app.getUser()));
+    assertEquals("allocatedMB doesn't match", 1024, allocatedMB);
+    assertEquals("allocatedVCores doesn't match", 1, allocatedVCores);
+    assertEquals("numContainers doesn't match", 1, numContainers);
   }
 
   @Test
   public void testAppAttempts() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024, "testwordcount", "user1");
+    RMApp app1 = rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     amNodeManager.nodeHeartbeat(true);
     testAppAttemptsHelper(app1.getApplicationId().toString(), app1,
         MediaType.APPLICATION_JSON);
@@ -1378,7 +1390,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testMultipleAppAttempts() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024, "testwordcount", "user1");
+    RMApp app1 = rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     amNodeManager.nodeHeartbeat(true);
     int maxAppAttempts = rm.getConfig().getInt(
         YarnConfiguration.RM_AM_MAX_ATTEMPTS,
@@ -1404,7 +1416,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppAttemptsSlash() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     testAppAttemptsHelper(app1.getApplicationId().toString() + "/", app1,
         MediaType.APPLICATION_JSON);
@@ -1415,7 +1427,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testAppAttemtpsDefault() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024);
+    RMApp app1 = rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     testAppAttemptsHelper(app1.getApplicationId().toString() + "/", app1, "");
     rm.stop();
@@ -1425,7 +1437,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testInvalidAppAttempts() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024);
+    rm.submitApp(CONTAINER_MB);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -1461,7 +1473,7 @@ public class TestRMWebServicesApps extends JerseyTest {
   public void testNonexistAppAttempts() throws JSONException, Exception {
     rm.start();
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    rm.submitApp(1024, "testwordcount", "user1");
+    rm.submitApp(CONTAINER_MB, "testwordcount", "user1");
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
 
@@ -1524,7 +1536,7 @@ public class TestRMWebServicesApps extends JerseyTest {
     rm.start();
     String user = "user1";
     MockNM amNodeManager = rm.registerNode("127.0.0.1:1234", 2048);
-    RMApp app1 = rm.submitApp(1024, "testwordcount", user);
+    RMApp app1 = rm.submitApp(CONTAINER_MB, "testwordcount", user);
     amNodeManager.nodeHeartbeat(true);
     WebResource r = resource();
     ClientResponse response = r.path("ws").path("v1").path("cluster")

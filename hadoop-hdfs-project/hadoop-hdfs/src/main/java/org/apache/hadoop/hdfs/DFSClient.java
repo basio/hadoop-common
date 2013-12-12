@@ -98,14 +98,21 @@ import org.apache.hadoop.fs.MD5MD5CRC32CastagnoliFileChecksum;
 import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
 import org.apache.hadoop.fs.MD5MD5CRC32GzipFileChecksum;
 import org.apache.hadoop.fs.Options;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.VolumeId;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.client.ClientMmapManager;
 import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveIterator;
+import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolIterator;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
 import org.apache.hadoop.hdfs.protocol.DSQuotaExceededException;
@@ -114,6 +121,7 @@ import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsBlocksMetadata;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
@@ -206,7 +214,43 @@ public class DFSClient implements java.io.Closeable {
   private boolean shouldUseLegacyBlockReaderLocal;
   private final CachingStrategy defaultReadCachingStrategy;
   private final CachingStrategy defaultWriteCachingStrategy;
+  private ClientMmapManager mmapManager;
   
+  private static final ClientMmapManagerFactory MMAP_MANAGER_FACTORY =
+      new ClientMmapManagerFactory();
+
+  private static final class ClientMmapManagerFactory {
+    private ClientMmapManager mmapManager = null;
+    /**
+     * Tracks the number of users of mmapManager.
+     */
+    private int refcnt = 0;
+
+    synchronized ClientMmapManager get(Configuration conf) {
+      if (refcnt++ == 0) {
+        mmapManager = ClientMmapManager.fromConf(conf);
+      } else {
+        String mismatches = mmapManager.verifyConfigurationMatches(conf);
+        if (!mismatches.isEmpty()) {
+          LOG.warn("The ClientMmapManager settings you specified " +
+            "have been ignored because another thread created the " +
+            "ClientMmapManager first.  " + mismatches);
+        }
+      }
+      return mmapManager;
+    }
+    
+    synchronized void unref(ClientMmapManager mmapManager) {
+      if (this.mmapManager != mmapManager) {
+        throw new IllegalArgumentException();
+      }
+      if (--refcnt == 0) {
+        IOUtils.cleanup(LOG, mmapManager);
+        mmapManager = null;
+      }
+    }
+  }
+
   /**
    * DFSClient configuration 
    */
@@ -534,6 +578,7 @@ public class DFSClient implements java.io.Closeable {
         new CachingStrategy(readDropBehind, readahead);
     this.defaultWriteCachingStrategy =
         new CachingStrategy(writeDropBehind, readahead);
+    this.mmapManager = MMAP_MANAGER_FACTORY.get(conf);
   }
   
   /**
@@ -738,9 +783,12 @@ public class DFSClient implements java.io.Closeable {
   
   /** Abort and release resources held.  Ignore all errors. */
   void abort() {
+    if (mmapManager != null) {
+      MMAP_MANAGER_FACTORY.unref(mmapManager);
+      mmapManager = null;
+    }
     clientRunning = false;
     closeAllFilesBeingWritten(true);
-
     try {
       // remove reference to this client and stop the renewer,
       // if there is no more clients under the renewer.
@@ -784,6 +832,10 @@ public class DFSClient implements java.io.Closeable {
    */
   @Override
   public synchronized void close() throws IOException {
+    if (mmapManager != null) {
+      MMAP_MANAGER_FACTORY.unref(mmapManager);
+      mmapManager = null;
+    }
     if(clientRunning) {
       closeAllFilesBeingWritten(false);
       clientRunning = false;
@@ -855,10 +907,15 @@ public class DFSClient implements java.io.Closeable {
     assert dtService != null;
     Token<DelegationTokenIdentifier> token =
       namenode.getDelegationToken(renewer);
-    token.setService(this.dtService);
 
-    LOG.info("Created " + DelegationTokenIdentifier.stringifyToken(token));
+    if (token != null) {
+      token.setService(this.dtService);
+      LOG.info("Created " + DelegationTokenIdentifier.stringifyToken(token));
+    } else {
+      LOG.info("Cannot get delegation token from " + renewer);
+    }
     return token;
+
   }
 
   /**
@@ -2236,7 +2293,73 @@ public class DFSClient implements java.io.Closeable {
       throw re.unwrapRemoteException();
     }
   }
+
+  public long addCacheDirective(
+      CacheDirectiveInfo info) throws IOException {
+    checkOpen();
+    try {
+      return namenode.addCacheDirective(info);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException();
+    }
+  }
   
+  public void modifyCacheDirective(
+      CacheDirectiveInfo info) throws IOException {
+    checkOpen();
+    try {
+      namenode.modifyCacheDirective(info);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException();
+    }
+  }
+
+  public void removeCacheDirective(long id)
+      throws IOException {
+    checkOpen();
+    try {
+      namenode.removeCacheDirective(id);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException();
+    }
+  }
+  
+  public RemoteIterator<CacheDirectiveEntry> listCacheDirectives(
+      CacheDirectiveInfo filter) throws IOException {
+    return new CacheDirectiveIterator(namenode, filter);
+  }
+
+  public void addCachePool(CachePoolInfo info) throws IOException {
+    checkOpen();
+    try {
+      namenode.addCachePool(info);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException();
+    }
+  }
+
+  public void modifyCachePool(CachePoolInfo info) throws IOException {
+    checkOpen();
+    try {
+      namenode.modifyCachePool(info);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException();
+    }
+  }
+
+  public void removeCachePool(String poolName) throws IOException {
+    checkOpen();
+    try {
+      namenode.removeCachePool(poolName);
+    } catch (RemoteException re) {
+      throw re.unwrapRemoteException();
+    }
+  }
+
+  public RemoteIterator<CachePoolEntry> listCachePools() throws IOException {
+    return new CachePoolIterator(namenode);
+  }
+
   /**
    * Save namespace image.
    * 
@@ -2262,6 +2385,11 @@ public class DFSClient implements java.io.Closeable {
     } catch(RemoteException re) {
       throw re.unwrapRemoteException(AccessControlException.class);
     }
+  }
+
+  @VisibleForTesting
+  ExtendedBlock getPreviousBlock(String file) {
+    return filesBeingWritten.get(file).getBlock();
   }
   
   /**
@@ -2495,5 +2623,10 @@ public class DFSClient implements java.io.Closeable {
 
   public CachingStrategy getDefaultWriteCachingStrategy() {
     return defaultWriteCachingStrategy;
+  }
+
+  @VisibleForTesting
+  public ClientMmapManager getMmapManager() {
+    return mmapManager;
   }
 }

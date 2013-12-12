@@ -23,16 +23,22 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.io.ByteArrayOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.security.PrivilegedAction;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FsShell;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
@@ -40,12 +46,16 @@ import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.INode;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
-import org.apache.hadoop.hdfs.server.namenode.INodeDirectoryWithQuota;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile;
+import org.apache.hadoop.hdfs.server.namenode.NameNode;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.hdfs.server.namenode.Quota;
+import org.apache.hadoop.hdfs.server.namenode.ha.HATestUtil;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot.DirectoryDiffList;
 import org.apache.hadoop.hdfs.util.ReadOnlyList;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.After;
 import org.junit.Before;
@@ -146,15 +156,21 @@ public class TestSnapshotDeletion {
     hdfs.delete(dir, true);
   }
   
+  private static INodeDirectory getDir(final FSDirectory fsdir, final Path dir)
+      throws IOException {
+    final String dirStr = dir.toString();
+    return INodeDirectory.valueOf(fsdir.getINode(dirStr), dirStr);
+  }
+
   private void checkQuotaUsageComputation(final Path dirPath,
       final long expectedNs, final long expectedDs) throws IOException {
-    INode node = fsdir.getINode(dirPath.toString());
-    assertTrue(node.isDirectory() && node.isQuotaSet());
-    INodeDirectoryWithQuota dirNode = (INodeDirectoryWithQuota) node;
+    INodeDirectory dirNode = getDir(fsdir, dirPath);
+    assertTrue(dirNode.isQuotaSet());
+    Quota.Counts q = dirNode.getDirectoryWithQuotaFeature().getSpaceConsumed();
     assertEquals(dirNode.dumpTreeRecursively().toString(), expectedNs,
-        dirNode.getNamespace());
+        q.get(Quota.NAMESPACE));
     assertEquals(dirNode.dumpTreeRecursively().toString(), expectedDs,
-        dirNode.getDiskspace());
+        q.get(Quota.DISKSPACE));
     Quota.Counts counts = Quota.Counts.newInstance();
     dirNode.computeQuotaUsage(counts, false);
     assertEquals(dirNode.dumpTreeRecursively().toString(), expectedNs,
@@ -261,10 +277,10 @@ public class TestSnapshotDeletion {
     TestSnapshotBlocksMap.assertBlockCollection(new Path(snapshotNoChangeDir,
         noChangeFileSCopy.getLocalName()).toString(), 1, fsdir, blockmanager);
     
-    INodeFileWithSnapshot metaChangeFile2SCopy = 
-        (INodeFileWithSnapshot) children.get(0);
+    INodeFile metaChangeFile2SCopy = children.get(0).asFile();
     assertEquals(metaChangeFile2.getName(), metaChangeFile2SCopy.getLocalName());
-    assertEquals(INodeFileWithSnapshot.class, metaChangeFile2SCopy.getClass());
+    assertTrue(metaChangeFile2SCopy.isWithSnapshot());
+    assertFalse(metaChangeFile2SCopy.isUnderConstruction());
     TestSnapshotBlocksMap.assertBlockCollection(new Path(snapshotNoChangeDir,
         metaChangeFile2SCopy.getLocalName()).toString(), 1, fsdir, blockmanager);
     
@@ -322,8 +338,9 @@ public class TestSnapshotDeletion {
     INode child = children.get(0);
     assertEquals(child.getLocalName(), metaChangeFile1.getName());
     // check snapshot copy of metaChangeFile1
-    assertEquals(INodeFileWithSnapshot.class, child.getClass());
-    INodeFileWithSnapshot metaChangeFile1SCopy = (INodeFileWithSnapshot) child;
+    INodeFile metaChangeFile1SCopy = child.asFile();
+    assertTrue(metaChangeFile1SCopy.isWithSnapshot());
+    assertFalse(metaChangeFile1SCopy.isUnderConstruction());
     assertEquals(REPLICATION_1,
         metaChangeFile1SCopy.getFileReplication(null));
     assertEquals(REPLICATION_1,
@@ -777,7 +794,40 @@ public class TestSnapshotDeletion {
     assertEquals("user1", statusOfS1.getOwner());
     assertEquals("group1", statusOfS1.getGroup());
   }
-  
+
+  @Test
+  public void testDeleteSnapshotWithPermissionsDisabled() throws Exception {
+    cluster.shutdown();
+    Configuration newConf = new Configuration(conf);
+    newConf.setBoolean(DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY, false);
+    cluster = new MiniDFSCluster.Builder(newConf).numDataNodes(0).build();
+    cluster.waitActive();
+    hdfs = cluster.getFileSystem();
+
+    final Path path = new Path("/dir");
+    hdfs.mkdirs(path);
+    hdfs.allowSnapshot(path);
+    hdfs.mkdirs(new Path(path, "/test"));
+    hdfs.createSnapshot(path, "s1");
+    UserGroupInformation anotherUser = UserGroupInformation
+        .createRemoteUser("anotheruser");
+    anotherUser.doAs(new PrivilegedAction<Object>() {
+      @Override
+      public Object run() {
+        DistributedFileSystem anotherUserFS = null;
+        try {
+          anotherUserFS = cluster.getFileSystem();
+          anotherUserFS.deleteSnapshot(path, "s1");
+        } catch (IOException e) {
+          fail("Failed to delete snapshot : " + e.getLocalizedMessage());
+        } finally {
+          IOUtils.closeStream(anotherUserFS);
+        }
+        return null;
+      }
+    });
+  }
+
   /** 
    * A test covering the case where the snapshot diff to be deleted is renamed 
    * to its previous snapshot. 
@@ -883,5 +933,80 @@ public class TestSnapshotDeletion {
     // combination
     subFile1Status = hdfs.getFileStatus(subFile1SCopy);
     assertEquals(REPLICATION_1, subFile1Status.getReplication());
+  }
+  
+  @Test
+  public void testDeleteSnapshotCommandWithIllegalArguments() throws Exception {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    PrintStream psOut = new PrintStream(out);
+    System.setOut(psOut);
+    System.setErr(psOut);
+    FsShell shell = new FsShell();
+    shell.setConf(conf);
+    
+    String[] argv1 = {"-deleteSnapshot", "/tmp"};
+    int val = shell.run(argv1);
+    assertTrue(val == -1);
+    assertTrue(out.toString().contains(
+        argv1[0] + ": Incorrect number of arguments."));
+    out.reset();
+    
+    String[] argv2 = {"-deleteSnapshot", "/tmp", "s1", "s2"};
+    val = shell.run(argv2);
+    assertTrue(val == -1);
+    assertTrue(out.toString().contains(
+        argv2[0] + ": Incorrect number of arguments."));
+    psOut.close();
+    out.close();
+  }
+
+  /*
+   * OP_DELETE_SNAPSHOT edits op was not decrementing the safemode threshold on
+   * restart in HA mode. HDFS-5504
+   */
+  @Test(timeout = 60000)
+  public void testHANNRestartAfterSnapshotDeletion() throws Exception {
+    hdfs.close();
+    cluster.shutdown();
+    conf = new Configuration();
+    cluster = new MiniDFSCluster.Builder(conf)
+        .nnTopology(MiniDFSNNTopology.simpleHATopology()).numDataNodes(1)
+        .build();
+    cluster.transitionToActive(0);
+    // stop the standby namenode
+    NameNode snn = cluster.getNameNode(1);
+    snn.stop();
+
+    hdfs = (DistributedFileSystem) HATestUtil
+        .configureFailoverFs(cluster, conf);
+    Path dir = new Path("/dir");
+    Path subDir = new Path(dir, "sub");
+    hdfs.mkdirs(dir);
+    hdfs.allowSnapshot(dir);
+    for (int i = 0; i < 5; i++) {
+      DFSTestUtil.createFile(hdfs, new Path(subDir, "" + i), 100, (short) 1,
+          1024L);
+    }
+
+    // take snapshot
+    hdfs.createSnapshot(dir, "s0");
+
+    // delete the subdir
+    hdfs.delete(subDir, true);
+
+    // roll the edit log
+    NameNode ann = cluster.getNameNode(0);
+    ann.getRpcServer().rollEditLog();
+
+    hdfs.deleteSnapshot(dir, "s0");
+    // wait for the blocks deletion at namenode
+    Thread.sleep(2000);
+
+    NameNodeAdapter.abortEditLogs(ann);
+    cluster.restartNameNode(0, false);
+    cluster.transitionToActive(0);
+
+    // wait till the cluster becomes active
+    cluster.waitClusterUp();
   }
 }

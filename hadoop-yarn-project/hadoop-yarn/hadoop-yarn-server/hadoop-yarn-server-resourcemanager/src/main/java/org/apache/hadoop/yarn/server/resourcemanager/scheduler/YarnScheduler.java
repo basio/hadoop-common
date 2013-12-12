@@ -19,15 +19,19 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
 
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -128,10 +132,42 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
   SchedulerAppReport getSchedulerAppInfo(ApplicationAttemptId appAttemptId);
 
   /**
+   * Get a resource usage report from a given app attempt ID.
+   * @param appAttemptId the id of the application attempt
+   * @return resource usage report for this given attempt
+   */
+  @LimitedPrivate("yarn")
+  @Evolving
+  ApplicationResourceUsageReport getAppResourceUsageReport(
+      ApplicationAttemptId appAttemptId);
+  
+  /**
    * Get the root queue for the scheduler.
    * @return the root queue for the scheduler.
    */
   @LimitedPrivate("yarn")
   @Evolving
   QueueMetrics getRootQueueMetrics();
+
+  /**
+   * Check if the user has permission to perform the operation.
+   * If the user has {@link QueueACL#ADMINISTER_QUEUE} permission,
+   * this user can view/modify the applications in this queue
+   * @param callerUGI
+   * @param acl
+   * @param queueName
+   * @return <code>true</code> if the user has the permission,
+   *         <code>false</code> otherwise
+   */
+  boolean checkAccess(UserGroupInformation callerUGI,
+      QueueACL acl, String queueName);
+  
+  /**
+   * Gets the apps under a given queue
+   * @param queueName the name of the queue.
+   * @return a collection of app attempt ids in the given queue.
+   */
+  @LimitedPrivate("yarn")
+  @Stable
+  public List<ApplicationAttemptId> getAppsInQueue(String queueName);
 }

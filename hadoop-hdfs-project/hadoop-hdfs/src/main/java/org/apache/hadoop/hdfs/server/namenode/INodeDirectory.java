@@ -34,8 +34,6 @@ import org.apache.hadoop.hdfs.protocol.SnapshotAccessControlException;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference.WithCount;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectorySnapshottable;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeFileUnderConstructionWithSnapshot;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeFileWithSnapshot;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.hdfs.util.ReadOnlyList;
 
@@ -47,6 +45,21 @@ import com.google.common.base.Preconditions;
  */
 public class INodeDirectory extends INodeWithAdditionalFields
     implements INodeDirectoryAttributes {
+  /** Directory related features such as quota and snapshots. */
+  public static abstract class Feature implements INode.Feature<Feature> {
+    private Feature nextFeature;
+
+    @Override
+    public Feature getNextFeature() {
+      return nextFeature;
+    }
+
+    @Override
+    public void setNextFeature(Feature next) {
+      this.nextFeature = next;
+    }
+  }
+
   /** Cast INode to INodeDirectory. */
   public static INodeDirectory valueOf(INode inode, Object path
       ) throws FileNotFoundException, PathIsNotDirectoryException {
@@ -64,6 +77,9 @@ public class INodeDirectory extends INodeWithAdditionalFields
   final static byte[] ROOT_NAME = DFSUtil.string2Bytes("");
 
   private List<INode> children = null;
+  
+  /** A linked list of {@link Feature}s. */
+  private Feature headFeature = null;
 
   /** constructor */
   public INodeDirectory(long id, byte[] name, PermissionStatus permissions,
@@ -77,13 +93,16 @@ public class INodeDirectory extends INodeWithAdditionalFields
    * @param adopt Indicate whether or not need to set the parent field of child
    *              INodes to the new node
    */
-  public INodeDirectory(INodeDirectory other, boolean adopt) {
+  public INodeDirectory(INodeDirectory other, boolean adopt, boolean copyFeatures) {
     super(other);
     this.children = other.children;
     if (adopt && this.children != null) {
       for (INode child : children) {
         child.setParent(this);
       }
+    }
+    if (copyFeatures) {
+      this.headFeature = other.headFeature;
     }
   }
 
@@ -102,6 +121,73 @@ public class INodeDirectory extends INodeWithAdditionalFields
   /** Is this a snapshottable directory? */
   public boolean isSnapshottable() {
     return false;
+  }
+
+  void setQuota(long nsQuota, long dsQuota) {
+    DirectoryWithQuotaFeature quota = getDirectoryWithQuotaFeature();
+    if (quota != null) {
+      // already has quota; so set the quota to the new values
+      quota.setQuota(nsQuota, dsQuota);
+      if (!isQuotaSet() && !isRoot()) {
+        removeFeature(quota);
+      }
+    } else {
+      final Quota.Counts c = computeQuotaUsage();
+      quota = addDirectoryWithQuotaFeature(nsQuota, dsQuota);
+      quota.setSpaceConsumed(c.get(Quota.NAMESPACE), c.get(Quota.DISKSPACE));
+    }
+  }
+
+  @Override
+  public Quota.Counts getQuotaCounts() {
+    final DirectoryWithQuotaFeature q = getDirectoryWithQuotaFeature();
+    return q != null? q.getQuota(): super.getQuotaCounts();
+  }
+
+  @Override
+  public void addSpaceConsumed(long nsDelta, long dsDelta, boolean verify) 
+      throws QuotaExceededException {
+    final DirectoryWithQuotaFeature q = getDirectoryWithQuotaFeature();
+    if (q != null) {
+      q.addSpaceConsumed(this, nsDelta, dsDelta, verify);
+    } else {
+      addSpaceConsumed2Parent(nsDelta, dsDelta, verify);
+    }
+  }
+
+  /**
+   * If the directory contains a {@link DirectoryWithQuotaFeature}, return it;
+   * otherwise, return null.
+   */
+  public final DirectoryWithQuotaFeature getDirectoryWithQuotaFeature() {
+    for(Feature f = headFeature; f != null; f = f.nextFeature) {
+      if (f instanceof DirectoryWithQuotaFeature) {
+        return (DirectoryWithQuotaFeature)f;
+      }
+    }
+    return null;
+  }
+
+  /** Is this directory with quota? */
+  final boolean isWithQuota() {
+    return getDirectoryWithQuotaFeature() != null;
+  }
+
+  DirectoryWithQuotaFeature addDirectoryWithQuotaFeature(
+      long nsQuota, long dsQuota) {
+    Preconditions.checkState(!isWithQuota(), "Directory is already with quota");
+    final DirectoryWithQuotaFeature quota = new DirectoryWithQuotaFeature(
+        nsQuota, dsQuota);
+    addFeature(quota);
+    return quota;
+  }
+
+  private void addFeature(Feature f) {
+    headFeature = INode.Feature.Util.addFeature(f, headFeature);
+  }
+
+  private void removeFeature(Feature f) {
+    headFeature = INode.Feature.Util.removeFeature(f, headFeature);
   }
 
   private int searchChildren(byte[] name) {
@@ -143,27 +229,6 @@ public class INodeDirectory extends INodeWithAdditionalFields
     return true;
   }
 
-  /**
-   * Replace itself with {@link INodeDirectoryWithQuota} or
-   * {@link INodeDirectoryWithSnapshot} depending on the latest snapshot.
-   */
-  INodeDirectoryWithQuota replaceSelf4Quota(final Snapshot latest,
-      final long nsQuota, final long dsQuota, final INodeMap inodeMap)
-      throws QuotaExceededException {
-    Preconditions.checkState(!(this instanceof INodeDirectoryWithQuota),
-        "this is already an INodeDirectoryWithQuota, this=%s", this);
-
-    if (!this.isInLatestSnapshot(latest)) {
-      final INodeDirectoryWithQuota q = new INodeDirectoryWithQuota(
-          this, true, nsQuota, dsQuota);
-      replaceSelf(q, inodeMap);
-      return q;
-    } else {
-      final INodeDirectoryWithSnapshot s = new INodeDirectoryWithSnapshot(this);
-      s.setQuota(nsQuota, dsQuota);
-      return replaceSelf(s, inodeMap).saveSelf2Snapshot(latest, this);
-    }
-  }
   /** Replace itself with an {@link INodeDirectorySnapshottable}. */
   public INodeDirectorySnapshottable replaceSelf4INodeDirectorySnapshottable(
       Snapshot latest, final INodeMap inodeMap) throws QuotaExceededException {
@@ -184,7 +249,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
   public INodeDirectory replaceSelf4INodeDirectory(final INodeMap inodeMap) {
     Preconditions.checkState(getClass() != INodeDirectory.class,
         "the class is already INodeDirectory, this=%s", this);
-    return replaceSelf(new INodeDirectory(this, true), inodeMap);
+    return replaceSelf(new INodeDirectory(this, true, true), inodeMap);
   }
 
   /** Replace itself with the given directory. */
@@ -204,7 +269,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
     clear();
     return newDir;
   }
-
+  
   /** Replace the given child with a new child. */
   public void replaceChild(INode oldChild, final INode newChild,
       final INodeMap inodeMap) {
@@ -255,34 +320,6 @@ public class INodeDirectory extends INodeWithAdditionalFields
         withCount, oldChild.getLocalNameBytes(), latest.getId());
     replaceChild(oldChild, ref, null);
     return ref;
-  }
-  
-  private void replaceChildFile(final INodeFile oldChild,
-      final INodeFile newChild, final INodeMap inodeMap) {
-    replaceChild(oldChild, newChild, inodeMap);
-    oldChild.clear();
-    newChild.updateBlockCollection();
-  }
-
-  /** Replace a child {@link INodeFile} with an {@link INodeFileWithSnapshot}. */
-  INodeFileWithSnapshot replaceChild4INodeFileWithSnapshot(
-      final INodeFile child, final INodeMap inodeMap) {
-    Preconditions.checkArgument(!(child instanceof INodeFileWithSnapshot),
-        "Child file is already an INodeFileWithSnapshot, child=" + child);
-    final INodeFileWithSnapshot newChild = new INodeFileWithSnapshot(child);
-    replaceChildFile(child, newChild, inodeMap);
-    return newChild;
-  }
-
-  /** Replace a child {@link INodeFile} with an {@link INodeFileUnderConstructionWithSnapshot}. */
-  INodeFileUnderConstructionWithSnapshot replaceChild4INodeFileUcWithSnapshot(
-      final INodeFileUnderConstruction child, final INodeMap inodeMap) {
-    Preconditions.checkArgument(!(child instanceof INodeFileUnderConstructionWithSnapshot),
-        "Child file is already an INodeFileUnderConstructionWithSnapshot, child=" + child);
-    final INodeFileUnderConstructionWithSnapshot newChild
-        = new INodeFileUnderConstructionWithSnapshot(child, null);
-    replaceChildFile(child, newChild, inodeMap);
-    return newChild;
   }
 
   @Override
@@ -451,6 +488,21 @@ public class INodeDirectory extends INodeWithAdditionalFields
   @Override
   public Quota.Counts computeQuotaUsage(Quota.Counts counts, boolean useCache,
       int lastSnapshotId) {
+    final DirectoryWithQuotaFeature q = getDirectoryWithQuotaFeature();
+    if (q != null) {
+      if (useCache && isQuotaSet()) {
+        q.addNamespaceDiskspace(counts);
+      } else {
+        computeDirectoryQuotaUsage(counts, false, lastSnapshotId);
+      }
+      return counts;
+    } else {
+      return computeDirectoryQuotaUsage(counts, useCache, lastSnapshotId);
+    }
+  }
+
+  Quota.Counts computeDirectoryQuotaUsage(Quota.Counts counts, boolean useCache,
+      int lastSnapshotId) {
     if (children != null) {
       for (INode child : children) {
         child.computeQuotaUsage(counts, useCache, lastSnapshotId);
@@ -466,12 +518,55 @@ public class INodeDirectory extends INodeWithAdditionalFields
   }
 
   @Override
-  public Content.Counts computeContentSummary(final Content.Counts counts) {
-    for (INode child : getChildrenList(null)) {
-      child.computeContentSummary(counts);
+  public ContentSummaryComputationContext computeContentSummary(
+      ContentSummaryComputationContext summary) {
+    final DirectoryWithQuotaFeature q = getDirectoryWithQuotaFeature();
+    if (q != null) {
+      return q.computeContentSummary(this, summary);
+    } else {
+      return computeDirectoryContentSummary(summary);
     }
-    counts.add(Content.DIRECTORY, 1);
-    return counts;
+  }
+
+  ContentSummaryComputationContext computeDirectoryContentSummary(
+      ContentSummaryComputationContext summary) {
+    ReadOnlyList<INode> childrenList = getChildrenList(null);
+    // Explicit traversing is done to enable repositioning after relinquishing
+    // and reacquiring locks.
+    for (int i = 0;  i < childrenList.size(); i++) {
+      INode child = childrenList.get(i);
+      byte[] childName = child.getLocalNameBytes();
+
+      long lastYieldCount = summary.getYieldCount();
+      child.computeContentSummary(summary);
+
+      // Check whether the computation was paused in the subtree.
+      // The counts may be off, but traversing the rest of children
+      // should be made safe.
+      if (lastYieldCount == summary.getYieldCount()) {
+        continue;
+      }
+
+      // The locks were released and reacquired. Check parent first.
+      if (getParent() == null) {
+        // Stop further counting and return whatever we have so far.
+        break;
+      }
+
+      // Obtain the children list again since it may have been modified.
+      childrenList = getChildrenList(null);
+      // Reposition in case the children list is changed. Decrement by 1
+      // since it will be incremented when loops.
+      i = nextChild(childrenList, childName) - 1;
+    }
+
+    // Increment the directory count for this directory.
+    summary.getCounts().add(Content.DIRECTORY, 1);
+
+    // Relinquish and reacquire locks if necessary.
+    summary.yield();
+
+    return summary;
   }
 
   /**
@@ -549,7 +644,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
       Quota.Counts counts = cleanSubtreeRecursively(snapshot, prior,
           collectedBlocks, removedINodes, null, countDiffChange);
       if (isQuotaSet()) {
-        ((INodeDirectoryWithQuota) this).addSpaceConsumed2Cache(
+        getDirectoryWithQuotaFeature().addSpaceConsumed2Cache(
             -counts.get(Quota.NAMESPACE), -counts.get(Quota.DISKSPACE));
       }
       return counts;
@@ -562,8 +657,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
   @Override
   public boolean metadataEquals(INodeDirectoryAttributes other) {
     return other != null
-        && getNsQuota() == other.getNsQuota()
-        && getDsQuota() == other.getDsQuota()
+        && getQuotaCounts().equals(other.getQuotaCounts())
         && getPermissionLong() == other.getPermissionLong();
   }
   
@@ -586,8 +680,9 @@ public class INodeDirectory extends INodeWithAdditionalFields
       final Snapshot snapshot) {
     super.dumpTreeRecursively(out, prefix, snapshot);
     out.print(", childrenSize=" + getChildrenList(snapshot).size());
-    if (this instanceof INodeDirectoryWithQuota) {
-      out.print(((INodeDirectoryWithQuota)this).quotaString());
+    final DirectoryWithQuotaFeature q = getDirectoryWithQuotaFeature();
+    if (q != null) {
+      out.print(", " + q);
     }
     if (this instanceof Snapshot.Root) {
       out.print(", snapshotId=" + snapshot.getId());

@@ -97,7 +97,6 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
     conf.setClass(
         YarnConfiguration.NM_CONTAINER_MON_RESOURCE_CALCULATOR,
         LinuxResourceCalculatorPlugin.class, ResourceCalculatorPlugin.class);
-    conf.setLong(YarnConfiguration.NM_SLEEP_DELAY_BEFORE_SIGKILL_MS, 1000);
     super.setup();
   }
 
@@ -388,8 +387,8 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
           + processStartFile);
       for (String serviceName : containerManager.getAuxServiceMetaData()
           .keySet()) {
-        fileWriter.println("@echo" + AuxiliaryServiceHelper.NM_AUX_SERVICE
-            + serviceName + " >> "
+        fileWriter.println("@echo %" + AuxiliaryServiceHelper.NM_AUX_SERVICE
+            + serviceName + "%>> "
             + processStartFile);
       }
       fileWriter.println("@echo " + cId + ">> " + processStartFile);
@@ -590,8 +589,9 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
         AuxiliaryServiceHelper.getServiceDataFromEnv(serviceName, env));
   }
 
-  @Test
-  public void testDelayedKill() throws Exception {
+  private void internalKillTest(boolean delayed) throws Exception {
+    conf.setLong(YarnConfiguration.NM_SLEEP_DELAY_BEFORE_SIGKILL_MS,
+      delayed ? 1000 : 0);
     containerManager.start();
 
     // ////// Construct the Container-id
@@ -675,23 +675,23 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
     BaseContainerManagerTest.waitForContainerState(containerManager, cId,
         ContainerState.COMPLETE);
 
-    // container stop sends a sigterm followed by a sigkill
+    // if delayed container stop sends a sigterm followed by a sigkill
+    // otherwise sigkill is sent immediately 
     GetContainerStatusesRequest gcsRequest =
         GetContainerStatusesRequest.newInstance(containerIds);
     
     ContainerStatus containerStatus = 
         containerManager.getContainerStatuses(gcsRequest)
           .getContainerStatuses().get(0);
-    int expectedExitCode = Shell.WINDOWS ? ExitCode.FORCE_KILLED.getExitCode() :
-      ExitCode.TERMINATED.getExitCode();
-    Assert.assertEquals(expectedExitCode, containerStatus.getExitStatus());
+    Assert.assertEquals(ExitCode.FORCE_KILLED.getExitCode(),
+        containerStatus.getExitStatus());
 
     // Now verify the contents of the file.  Script generates a message when it
     // receives a sigterm so we look for that.  We cannot perform this check on
     // Windows, because the process is not notified when killed by winutils.
     // There is no way for the process to trap and respond.  Instead, we can
     // verify that the job object with ID matching container ID no longer exists.
-    if (Shell.WINDOWS) {
+    if (Shell.WINDOWS || !delayed) {
       Assert.assertFalse("Process is still alive!",
         DefaultContainerExecutor.containerIsAlive(cId.toString()));
     } else {
@@ -712,6 +712,16 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
       Assert.assertTrue("Did not find sigterm message", foundSigTermMessage);
       reader.close();
     }
+  }
+
+  @Test
+  public void testDelayedKill() throws Exception {
+    internalKillTest(true);
+  }
+
+  @Test
+  public void testImmediateKill() throws Exception {
+    internalKillTest(false);
   }
 
   @SuppressWarnings("rawtypes")

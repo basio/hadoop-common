@@ -19,15 +19,10 @@ package org.apache.hadoop.nfs.nfs3;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.mount.MountdBase;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.oncrpc.RpcProgram;
-import org.apache.hadoop.oncrpc.RpcUtil;
 import org.apache.hadoop.oncrpc.SimpleTcpServer;
-import org.apache.hadoop.oncrpc.SimpleTcpServerHandler;
 import org.apache.hadoop.portmap.PortmapMapping;
-import org.jboss.netty.channel.ChannelPipeline;
-import org.jboss.netty.channel.ChannelPipelineFactory;
-import org.jboss.netty.channel.Channels;
 
 /**
  * Nfs server. Supports NFS v3 using {@link RpcProgram}.
@@ -36,45 +31,34 @@ import org.jboss.netty.channel.Channels;
  */
 public abstract class Nfs3Base {
   public static final Log LOG = LogFactory.getLog(Nfs3Base.class);
-  private final MountdBase mountd;
   private final RpcProgram rpcProgram;
-  
-  public MountdBase getMountBase() {
-    return mountd;
-  }
-  
+  private final int nfsPort;
+  private int nfsBoundPort; // Will set after server starts
+    
   public RpcProgram getRpcProgram() {
     return rpcProgram;
   }
 
-  protected Nfs3Base(MountdBase mountd, RpcProgram program) {
-    this.mountd = mountd;
-    this.rpcProgram = program;
+  protected Nfs3Base(RpcProgram rpcProgram, Configuration conf) {
+    this.rpcProgram = rpcProgram;
+    this.nfsPort = conf.getInt(Nfs3Constant.NFS3_SERVER_PORT,
+        Nfs3Constant.NFS3_SERVER_PORT_DEFAULT);
+    LOG.info("NFS server port set to: " + nfsPort);
   }
 
   public void start(boolean register) {
-    mountd.start(register); // Start mountd
     startTCPServer(); // Start TCP server
+    
     if (register) {
-      rpcProgram.register(PortmapMapping.TRANSPORT_TCP);
+      rpcProgram.register(PortmapMapping.TRANSPORT_TCP, nfsBoundPort);
     }
   }
 
   private void startTCPServer() {
-    SimpleTcpServer tcpServer = new SimpleTcpServer(Nfs3Constant.PORT,
-        rpcProgram, 0) {
-      @Override
-      public ChannelPipelineFactory getPipelineFactory() {
-        return new ChannelPipelineFactory() {
-          @Override
-          public ChannelPipeline getPipeline() {
-            return Channels.pipeline(
-                RpcUtil.constructRpcFrameDecoder(),
-                new SimpleTcpServerHandler(rpcProgram));
-          }
-        };
-      }
-    };
+    SimpleTcpServer tcpServer = new SimpleTcpServer(nfsPort,
+        rpcProgram, 0);
+    rpcProgram.startDaemons();
     tcpServer.run();
+    nfsBoundPort = tcpServer.getBoundPort();
   }
 }

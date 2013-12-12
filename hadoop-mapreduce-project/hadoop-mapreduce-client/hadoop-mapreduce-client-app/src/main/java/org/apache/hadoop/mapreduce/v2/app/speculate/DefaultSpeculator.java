@@ -28,7 +28,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
@@ -75,8 +74,15 @@ public class DefaultSpeculator extends AbstractService implements
   private final ConcurrentMap<TaskId, Boolean> runningTasks
       = new ConcurrentHashMap<TaskId, Boolean>();
 
-  private final Map<Task, AtomicBoolean> pendingSpeculations
-      = new ConcurrentHashMap<Task, AtomicBoolean>();
+  // Used to track any TaskAttempts that aren't heart-beating for a while, so
+  // that we can aggressively speculate instead of waiting for task-timeout.
+  private final ConcurrentMap<TaskAttemptId, TaskAttemptHistoryStatistics>
+      runningTaskAttemptStatistics = new ConcurrentHashMap<TaskAttemptId,
+          TaskAttemptHistoryStatistics>();
+  // Regular heartbeat from tasks is every 3 secs. So if we don't get a
+  // heartbeat in 9 secs (3 heartbeats), we simulate a heartbeat with no change
+  // in progress.
+  private static final long MAX_WAITTING_TIME_FOR_HEARTBEAT = 9 * 1000;
 
   // These are the current needs, not the initial needs.  For each job, these
   //  record the number of attempts that exist and that are actively
@@ -318,17 +324,13 @@ public class DefaultSpeculator extends AbstractService implements
 
     estimator.updateAttempt(reportedStatus, timestamp);
 
-    // If the task is already known to be speculation-bait, don't do anything
-    if (pendingSpeculations.get(task) != null) {
-      if (pendingSpeculations.get(task).get()) {
-        return;
-      }
-    }
-
     if (stateString.equals(TaskAttemptState.RUNNING.name())) {
       runningTasks.putIfAbsent(taskID, Boolean.TRUE);
     } else {
       runningTasks.remove(taskID, Boolean.TRUE);
+      if (!stateString.equals(TaskAttemptState.STARTING.name())) {
+        runningTaskAttemptStatistics.remove(attemptID);
+      }
     }
   }
 
@@ -388,6 +390,33 @@ public class DefaultSpeculator extends AbstractService implements
 
         long estimatedReplacementEndTime
             = now + estimator.estimatedNewAttemptRuntime(taskID);
+
+        float progress = taskAttempt.getProgress();
+        TaskAttemptHistoryStatistics data =
+            runningTaskAttemptStatistics.get(runningTaskAttemptID);
+        if (data == null) {
+          runningTaskAttemptStatistics.put(runningTaskAttemptID,
+            new TaskAttemptHistoryStatistics(estimatedRunTime, progress, now));
+        } else {
+          if (estimatedRunTime == data.getEstimatedRunTime()
+              && progress == data.getProgress()) {
+            // Previous stats are same as same stats
+            if (data.notHeartbeatedInAWhile(now)) {
+              // Stats have stagnated for a while, simulate heart-beat.
+              TaskAttemptStatus taskAttemptStatus = new TaskAttemptStatus();
+              taskAttemptStatus.id = runningTaskAttemptID;
+              taskAttemptStatus.progress = progress;
+              taskAttemptStatus.taskState = taskAttempt.getState();
+              // Now simulate the heart-beat
+              handleAttempt(taskAttemptStatus);
+            }
+          } else {
+            // Stats have changed - update our data structure
+            data.setEstimatedRunTime(estimatedRunTime);
+            data.setProgress(progress);
+            data.resetHeartBeatTime(now);
+          }
+        }
 
         if (estimatedEndTime < now) {
           return PROGRESS_IS_GOOD;
@@ -510,5 +539,48 @@ public class DefaultSpeculator extends AbstractService implements
   private int computeSpeculations() {
     // We'll try to issue one map and one reduce speculation per job per run
     return maybeScheduleAMapSpeculation() + maybeScheduleAReduceSpeculation();
+  }
+
+  static class TaskAttemptHistoryStatistics {
+
+    private long estimatedRunTime;
+    private float progress;
+    private long lastHeartBeatTime;
+
+    public TaskAttemptHistoryStatistics(long estimatedRunTime, float progress,
+        long nonProgressStartTime) {
+      this.estimatedRunTime = estimatedRunTime;
+      this.progress = progress;
+      resetHeartBeatTime(nonProgressStartTime);
+    }
+
+    public long getEstimatedRunTime() {
+      return this.estimatedRunTime;
+    }
+
+    public float getProgress() {
+      return this.progress;
+    }
+
+    public void setEstimatedRunTime(long estimatedRunTime) {
+      this.estimatedRunTime = estimatedRunTime;
+    }
+
+    public void setProgress(float progress) {
+      this.progress = progress;
+    }
+
+    public boolean notHeartbeatedInAWhile(long now) {
+      if (now - lastHeartBeatTime <= MAX_WAITTING_TIME_FOR_HEARTBEAT) {
+        return false;
+      } else {
+        resetHeartBeatTime(now);
+        return true;
+      }
+    }
+
+    public void resetHeartBeatTime(long lastHeartBeatTime) {
+      this.lastHeartBeatTime = lastHeartBeatTime;
+    }
   }
 }

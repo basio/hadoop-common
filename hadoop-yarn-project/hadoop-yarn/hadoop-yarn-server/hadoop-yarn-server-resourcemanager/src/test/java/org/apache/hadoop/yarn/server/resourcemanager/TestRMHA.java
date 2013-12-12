@@ -26,6 +26,7 @@ import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
 import org.apache.hadoop.ha.HealthCheckFailedException;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.conf.HAUtil;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -42,17 +43,26 @@ public class TestRMHA {
   private static final String STATE_ERR =
       "ResourceManager is in wrong HA state";
 
+  private static final String RM1_ADDRESS = "0.0.0.0:0";
+  private static final String RM1_NODE_ID = "rm1";
+
   @Before
   public void setUp() throws Exception {
     Configuration conf = new YarnConfiguration();
     conf.setBoolean(YarnConfiguration.RM_HA_ENABLED, true);
+    conf.set(YarnConfiguration.RM_HA_IDS, RM1_NODE_ID);
+    for (String confKey : YarnConfiguration.RM_RPC_ADDRESS_CONF_KEYS) {
+      conf.set(HAUtil.addSuffix(confKey, RM1_NODE_ID), RM1_ADDRESS);
+    }
+    conf.set(YarnConfiguration.RM_HA_ID, RM1_NODE_ID);
+
     rm = new MockRM(conf);
     rm.init(conf);
   }
 
-  private void checkMonitorHealth() {
+  private void checkMonitorHealth() throws IOException {
     try {
-      rm.haService.monitorHealth();
+      rm.adminService.monitorHealth();
     } catch (HealthCheckFailedException e) {
       fail("The RM is in bad health: it is Active, but the active services " +
           "are not running");
@@ -61,20 +71,20 @@ public class TestRMHA {
 
   private void checkStandbyRMFunctionality() throws IOException {
     assertEquals(STATE_ERR, HAServiceState.STANDBY,
-        rm.haService.getServiceStatus().getState());
+        rm.adminService.getServiceStatus().getState());
     assertFalse("Active RM services are started",
         rm.areActiveServicesRunning());
     assertTrue("RM is not ready to become active",
-        rm.haService.getServiceStatus().isReadyToBecomeActive());
+        rm.adminService.getServiceStatus().isReadyToBecomeActive());
   }
 
   private void checkActiveRMFunctionality() throws IOException {
     assertEquals(STATE_ERR, HAServiceState.ACTIVE,
-        rm.haService.getServiceStatus().getState());
+        rm.adminService.getServiceStatus().getState());
     assertTrue("Active RM services aren't started",
         rm.areActiveServicesRunning());
     assertTrue("RM is not ready to become active",
-        rm.haService.getServiceStatus().isReadyToBecomeActive());
+        rm.adminService.getServiceStatus().isReadyToBecomeActive());
 
     try {
       rm.getNewAppId();
@@ -103,9 +113,9 @@ public class TestRMHA {
         HAServiceProtocol.RequestSource.REQUEST_BY_USER);
 
     assertEquals(STATE_ERR, HAServiceState.INITIALIZING,
-        rm.haService.getServiceStatus().getState());
+        rm.adminService.getServiceStatus().getState());
     assertFalse("RM is ready to become active before being started",
-        rm.haService.getServiceStatus().isReadyToBecomeActive());
+        rm.adminService.getServiceStatus().isReadyToBecomeActive());
     checkMonitorHealth();
 
     rm.start();
@@ -113,27 +123,27 @@ public class TestRMHA {
     checkStandbyRMFunctionality();
 
     // 1. Transition to Standby - must be a no-op
-    rm.haService.transitionToStandby(requestInfo);
+    rm.adminService.transitionToStandby(requestInfo);
     checkMonitorHealth();
     checkStandbyRMFunctionality();
 
     // 2. Transition to active
-    rm.haService.transitionToActive(requestInfo);
+    rm.adminService.transitionToActive(requestInfo);
     checkMonitorHealth();
     checkActiveRMFunctionality();
 
     // 3. Transition to active - no-op
-    rm.haService.transitionToActive(requestInfo);
+    rm.adminService.transitionToActive(requestInfo);
     checkMonitorHealth();
     checkActiveRMFunctionality();
 
     // 4. Transition to standby
-    rm.haService.transitionToStandby(requestInfo);
+    rm.adminService.transitionToStandby(requestInfo);
     checkMonitorHealth();
     checkStandbyRMFunctionality();
 
     // 5. Transition to active to check Active->Standby->Active works
-    rm.haService.transitionToActive(requestInfo);
+    rm.adminService.transitionToActive(requestInfo);
     checkMonitorHealth();
     checkActiveRMFunctionality();
 
@@ -141,9 +151,9 @@ public class TestRMHA {
     // become active
     rm.stop();
     assertEquals(STATE_ERR, HAServiceState.STOPPING,
-        rm.haService.getServiceStatus().getState());
+        rm.adminService.getServiceStatus().getState());
     assertFalse("RM is ready to become active even after it is stopped",
-        rm.haService.getServiceStatus().isReadyToBecomeActive());
+        rm.adminService.getServiceStatus().isReadyToBecomeActive());
     assertFalse("Active RM services are started",
         rm.areActiveServicesRunning());
     checkMonitorHealth();

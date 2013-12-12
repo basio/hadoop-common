@@ -24,10 +24,13 @@ import java.security.AccessControlException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.commons.lang.math.LongRange;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
@@ -66,11 +69,13 @@ import org.apache.hadoop.yarn.api.protocolrecords.RenewDelegationTokenResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.NodeState;
+import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
@@ -90,6 +95,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMDelegationTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.authorize.RMPolicyProvider;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
@@ -119,15 +125,18 @@ public class ClientRMService extends AbstractService implements
   InetSocketAddress clientBindAddress;
 
   private final ApplicationACLsManager applicationsACLsManager;
+  private final QueueACLsManager queueACLsManager;
 
   public ClientRMService(RMContext rmContext, YarnScheduler scheduler,
       RMAppManager rmAppManager, ApplicationACLsManager applicationACLsManager,
+      QueueACLsManager queueACLsManager,
       RMDelegationTokenSecretManager rmDTSecretManager) {
     super(ClientRMService.class.getName());
     this.scheduler = scheduler;
     this.rmContext = rmContext;
     this.rmAppManager = rmAppManager;
     this.applicationsACLsManager = applicationACLsManager;
+    this.queueACLsManager = queueACLsManager;
     this.rmDTSecretManager = rmDTSecretManager;
   }
 
@@ -185,13 +194,16 @@ public class ClientRMService extends AbstractService implements
    * @param callerUGI
    * @param owner
    * @param operationPerformed
-   * @param applicationId
+   * @param application
    * @return
    */
   private boolean checkAccess(UserGroupInformation callerUGI, String owner,
-      ApplicationAccessType operationPerformed, ApplicationId applicationId) {
+      ApplicationAccessType operationPerformed,
+      RMApp application) {
     return applicationsACLsManager.checkAccess(callerUGI, operationPerformed,
-        owner, applicationId);
+        owner, application.getApplicationId())
+        || queueACLsManager.checkAccess(callerUGI, QueueACL.ADMINISTER_QUEUE,
+            application.getQueue());
   }
 
   ApplicationId getNewApplicationId() {
@@ -241,7 +253,7 @@ public class ClientRMService extends AbstractService implements
     }
 
     boolean allowAccess = checkAccess(callerUGI, application.getUser(),
-        ApplicationAccessType.VIEW_APP, applicationId);
+        ApplicationAccessType.VIEW_APP, application);
     ApplicationReport report =
         application.createAndGetApplicationReport(callerUGI.getUserName(),
             allowAccess);
@@ -309,7 +321,7 @@ public class ClientRMService extends AbstractService implements
     try {
       // call RMAppManager to submit application directly
       rmAppManager.submitApplication(submissionContext,
-          System.currentTimeMillis(), false, user);
+          System.currentTimeMillis(), user, false, null);
 
       LOG.info("Application with id " + applicationId.getId() + 
           " submitted by user " + user);
@@ -357,7 +369,7 @@ public class ClientRMService extends AbstractService implements
     }
 
     if (!checkAccess(callerUGI, application.getUser(),
-        ApplicationAccessType.MODIFY_APP, applicationId)) {
+        ApplicationAccessType.MODIFY_APP, application)) {
       RMAuditLogger.logFailure(callerUGI.getShortUserName(),
           AuditConstants.KILL_APP_REQUEST,
           "User doesn't have permissions to "
@@ -393,6 +405,18 @@ public class ClientRMService extends AbstractService implements
   @Override
   public GetApplicationsResponse getApplications(
       GetApplicationsRequest request) throws YarnException {
+    return getApplications(request, true);
+  }
+
+  /**
+   * Get applications matching the {@link GetApplicationsRequest}. If
+   * caseSensitive is set to false, applicationTypes in
+   * GetApplicationRequest are expected to be in all-lowercase
+   */
+  @Private
+  public GetApplicationsResponse getApplications(
+      GetApplicationsRequest request, boolean caseSensitive)
+      throws YarnException {
     UserGroupInformation callerUGI;
     try {
       callerUGI = UserGroupInformation.getCurrentUser();
@@ -404,11 +428,62 @@ public class ClientRMService extends AbstractService implements
     Set<String> applicationTypes = request.getApplicationTypes();
     EnumSet<YarnApplicationState> applicationStates =
         request.getApplicationStates();
+    Set<String> users = request.getUsers();
+    Set<String> queues = request.getQueues();
+    long limit = request.getLimit();
+    LongRange start = request.getStartRange();
+    LongRange finish = request.getFinishRange();
 
+    final Map<ApplicationId, RMApp> apps = rmContext.getRMApps();
+    Iterator<RMApp> appsIter;
+    // If the query filters by queues, we can avoid considering apps outside
+    // of those queues by asking the scheduler for the apps in those queues.
+    if (queues != null && !queues.isEmpty()) {
+      // Construct an iterator over apps in given queues
+      // Collect list of lists to avoid copying all apps
+      final List<List<ApplicationAttemptId>> queueAppLists =
+          new ArrayList<List<ApplicationAttemptId>>();
+      for (String queue : queues) {
+        List<ApplicationAttemptId> appsInQueue = scheduler.getAppsInQueue(queue);
+        if (appsInQueue != null && !appsInQueue.isEmpty()) {
+          queueAppLists.add(appsInQueue);
+        }
+      }
+      appsIter = new Iterator<RMApp>() {
+        Iterator<List<ApplicationAttemptId>> appListIter = queueAppLists.iterator();
+        Iterator<ApplicationAttemptId> schedAppsIter;
+
+        @Override
+        public boolean hasNext() {
+          // Because queueAppLists has no empty lists, hasNext is whether the
+          // current list hasNext or whether there are any remaining lists
+          return (schedAppsIter != null && schedAppsIter.hasNext())
+              || appListIter.hasNext();
+        }
+        @Override
+        public RMApp next() {
+          if (schedAppsIter == null || !schedAppsIter.hasNext()) {
+            schedAppsIter = appListIter.next().iterator();
+          }
+          return apps.get(schedAppsIter.next().getApplicationId());
+        }
+        @Override
+        public void remove() {
+          throw new UnsupportedOperationException("Remove not supported");
+        }
+      };
+    } else {
+      appsIter = apps.values().iterator();
+    }
+    
     List<ApplicationReport> reports = new ArrayList<ApplicationReport>();
-    for (RMApp application : this.rmContext.getRMApps().values()) {
+    while (appsIter.hasNext() && reports.size() < limit) {
+      RMApp application = appsIter.next();
       if (applicationTypes != null && !applicationTypes.isEmpty()) {
-        if (!applicationTypes.contains(application.getApplicationType())) {
+        String appTypeToMatch = caseSensitive
+            ? application.getApplicationType()
+            : application.getApplicationType().toLowerCase();
+        if (!applicationTypes.contains(appTypeToMatch)) {
           continue;
         }
       }
@@ -419,8 +494,22 @@ public class ClientRMService extends AbstractService implements
           continue;
         }
       }
+
+      if (users != null && !users.isEmpty() &&
+          !users.contains(application.getUser())) {
+        continue;
+      }
+
+      if (start != null && !start.containsLong(application.getStartTime())) {
+        continue;
+      }
+
+      if (finish != null && !finish.containsLong(application.getFinishTime())) {
+        continue;
+      }
+
       boolean allowAccess = checkAccess(callerUGI, application.getUser(),
-          ApplicationAccessType.VIEW_APP, application.getApplicationId());
+          ApplicationAccessType.VIEW_APP, application);
       reports.add(application.createAndGetApplicationReport(
           callerUGI.getUserName(), allowAccess));
     }
@@ -463,13 +552,12 @@ public class ClientRMService extends AbstractService implements
             request.getRecursive());
       List<ApplicationReport> appReports = EMPTY_APPS_REPORT;
       if (request.getIncludeApplications()) {
-        Collection<RMApp> apps = this.rmContext.getRMApps().values();
-        appReports = new ArrayList<ApplicationReport>(
-            apps.size());
-        for (RMApp app : apps) {
-          if (app.getQueue().equals(queueInfo.getQueueName())) {
-            appReports.add(app.createAndGetApplicationReport(null, true));
-          }
+        List<ApplicationAttemptId> apps =
+            scheduler.getAppsInQueue(request.getQueueName());
+        appReports = new ArrayList<ApplicationReport>(apps.size());
+        for (ApplicationAttemptId app : apps) {
+          RMApp rmApp = rmContext.getRMApps().get(app.getApplicationId());
+          appReports.add(rmApp.createAndGetApplicationReport(null, true));
         }
       }
       queueInfo.setApplications(appReports);

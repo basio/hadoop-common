@@ -277,17 +277,23 @@ Trunk (Unreleased)
     HADOOP-9740. Fix FsShell '-text' command to be able to read Avro
     files stored in HDFS and other filesystems. (Allan Yan via cutting)
 
+    HDFS-5471. CacheAdmin -listPools fails when user lacks permissions to view
+    all pools (Andrew Wang via Colin Patrick McCabe)
+
   OPTIMIZATIONS
 
     HADOOP-7761. Improve the performance of raw comparisons. (todd)
 
-    HADOOP-8589 ViewFs tests fail when tests and home dirs are nested (sanjay Radia)
+    HADOOP-8589. ViewFs tests fail when tests and home dirs are nested (sanjay Radia)
 
-Release 2.3.0 - UNRELEASED
+Release 2.4.0 - UNRELEASED
 
   INCOMPATIBLE CHANGES
 
   NEW FEATURES
+
+    HADOOP-8545. Filesystem Implementation for OpenStack Swift
+    (Dmitry Mezhensky, David Dobbins, Stevel via stevel)
 
   IMPROVEMENTS
 
@@ -312,9 +318,6 @@ Release 2.3.0 - UNRELEASED
     HADOOP-9435.  Support building the JNI code against the IBM JVM.
     (Tian Hong Wang via Colin Patrick McCabe)
 
-    HADOOP-9758.  Provide configuration option for FileSystem/FileContext
-    symlink resolution.  (Andrew Wang via Colin Patrick McCabe)
-
     HADOOP-9848. Create a MiniKDC for use with security testing. 
     (ywskycn via tucu)
 
@@ -333,17 +336,79 @@ Release 2.3.0 - UNRELEASED
     HADOOP-9915.  o.a.h.fs.Stat support on Mac OS X  (Binglin Chang via Colin
     Patrick McCabe)
 
+    HADOOP-9998.  Provide methods to clear only part of the DNSToSwitchMapping.
+    (Junping Du via Colin Patrick McCabe)
+
+    HADOOP-10006. Compilation failure in trunk for
+    o.a.h.fs.swift.util.JSONUtil (Junping Du via stevel)
+
+    HADOOP-9063. enhance unit-test coverage of class
+    org.apache.hadoop.fs.FileUtil (Ivan A. Veselovsky via jlowe)
+
+    HADOOP-9254. Cover packages org.apache.hadoop.util.bloom,
+    org.apache.hadoop.util.hash (Vadim Bondarev via jlowe)
+
+    HADOOP-9225. Cover package org.apache.hadoop.compress.Snappy (Vadim
+    Bondarev, Andrey Klochkov and Nathan Roberts via jlowe)
+
+    HADOOP-9199. Cover package org.apache.hadoop.io with unit tests (Andrey
+    Klochkov via jeagles)
+
+    HADOOP-9470. eliminate duplicate FQN tests in different Hadoop modules
+    (Ivan A. Veselovsky via daryn)
+
+    HADOOP-9494. Excluded auto-generated and examples code from clover reports
+    (Andrey Klochkov via jeagles)
+
+    HADOOP-9897. Add method to get path start position without drive specifier in
+    o.a.h.fs.Path. (Binglin Chang via cnauroth)
+
+    HADOOP-9078. enhance unit-test coverage of class
+    org.apache.hadoop.fs.FileContext (Ivan A. Veselovsky via jeagles)
+
+    HDFS-5276. FileSystem.Statistics should use thread-local counters to avoid
+    multi-threaded performance issues on read/write.  (Colin Patrick McCabe)
+
+    HADOOP-9291. enhance unit-test coverage of package o.a.h.metrics2 (Ivan A.
+    Veselovsky via jeagles)
+
+    HADOOP-10064. Upgrade to maven antrun plugin version 1.7 (Arpit Agarwal via
+    jeagles)
+
+    HADOOP-9594. Update apache commons math dependency (Timothy St. Clair via
+    stevel)
+
+    HADOOP-10095. In CodecPool, synchronize pool and codecList separately in
+    order to reduce lock contention.  (Nicolas Liochon via szetszwo)
+
+    HADOOP-10067. Missing POM dependency on jsr305 (Robert Rati via stevel)
+
+    HADOOP-10103. update commons-lang to 2.6 (Akira AJISAKA via stevel)
+
+    HADOOP-10111. Allow DU to be initialized with an initial value (Kihwal Lee
+    via jeagles)
+
+    HADOOP-10126. LightWeightGSet log message is confusing. (Vinay via suresh)
+
+    HADOOP-10127. Add ipc.client.connect.retry.interval to control the frequency
+    of connection retries (Karthik Kambatla via Sandy Ryza)
+
+    HADOOP-10102. Update commons IO from 2.1 to 2.4 (Akira Ajisaka via stevel)
+
   OPTIMIZATIONS
 
     HADOOP-9748. Reduce blocking on UGI.ensureInitialized (daryn)
 
+   HADOOP-10047. Add a direct-buffer based apis for compression. (Gopal V
+   via acmurthy)
+
   BUG FIXES
+
+    HADOOP-9964. Fix deadlocks in TestHttpServer by synchronize
+    ReflectionUtils.printThreadInfo. (Junping Du via llu)
 
     HADOOP-9582. Non-existent file to "hadoop fs -conf" doesn't throw error
     (Ashwin Shankar via jlowe)
-
-    HADOOP-9761.  ViewFileSystem#rename fails when using DistributedFileSystem.
-    (Andrew Wang via Colin Patrick McCabe)
 
     HADOOP-9817. FileSystem#globStatus and FileContext#globStatus need to work
     with symlinks. (Colin Patrick McCabe via Andrew Wang)
@@ -372,7 +437,35 @@ Release 2.3.0 - UNRELEASED
     HADOOP-9791. Add a test case covering long paths for new FileUtil access
     check methods (ivanmi)
 
-Release 2.2.0 - UNRELEASED
+    HADOOP-9981. globStatus should minimize its listStatus and getFileStatus
+    calls.  (Contributed by Colin Patrick McCabe)
+
+    HADOOP-9016. HarFsInputStream.skip(long) must never return negative value.
+    (Ivan A. Veselovsky via jeagles)
+
+    HADOOP-10088. copy-nativedistlibs.sh needs to quote snappy lib dir.
+    (Raja Aluri via cnauroth)
+
+    HADOOP-10093. hadoop-env.cmd sets HADOOP_CLIENT_OPTS with a max heap size
+    that is too small. (Shanyu Zhao via cnauroth)
+
+    HADOOP-10094. NPE in GenericOptionsParser#preProcessForWindows().
+    (Enis Soztutar via cnauroth)
+
+    HADOOP-10100. MiniKDC shouldn't use apacheds-all artifact. (rkanter via tucu)
+
+    HADOOP-10107. Server.getNumOpenConnections may throw NPE. (Kihwal Lee via
+    jing9)
+
+    HADOOP-10135 writes to swift fs over partition size leave temp files and
+    empty output file (David Dobbins via stevel)
+
+    HADOOP-10129. Distcp may succeed when it fails (daryn)
+
+    HADOOP-10058. TestMetricsSystemImpl#testInitFirstVerifyStopInvokedImmediately
+    fails on trunk (Chen He via jeagles)
+
+Release 2.3.0 - UNRELEASED
 
   INCOMPATIBLE CHANGES
 
@@ -380,9 +473,109 @@ Release 2.2.0 - UNRELEASED
 
   IMPROVEMENTS
 
+    HADOOP-10046. Print a log message when SSL is enabled.
+    (David S. Wang via wang)
+
+    HADOOP-10079. log a warning message if group resolution takes too long.
+    (cmccabe)
+
+    HADOOP-9623 Update jets3t dependency to 0.9.0.  (Amandeep Khurana via Colin
+    Patrick McCabe)
+
+    HADOOP-10132. RPC#stopProxy() should log the class of proxy when IllegalArgumentException 
+    is encountered (Ted yu via umamahesh)
+
+  OPTIMIZATIONS
+
+    HADOOP-10142. Avoid groups lookup for unprivileged users such as "dr.who"
+    (vinay via cmccabe)
+
+  BUG FIXES
+
+    HADOOP-10028. Malformed ssl-server.xml.example. (Haohui Mai via jing9)
+
+    HADOOP-10030. FsShell -put/copyFromLocal should support Windows local path.
+    (Chuan Liu via cnauroth)
+
+    HADOOP-10031. FsShell -get/copyToLocal/moveFromLocal should support Windows
+    local path. (Chuan Liu via cnauroth)
+
+    HADOOP-10039. Add Hive to the list of projects using 
+    AbstractDelegationTokenSecretManager. (Haohui Mai via jing9)
+
+    HADOOP-10040. hadoop.cmd in UNIX format and would not run by default on
+    Windows. (cnauroth)
+
+    HADOOP-10055. FileSystemShell.apt.vm doc has typo "numRepicas".
+    (Akira Ajisaka via cnauroth)
+
+    HADOOP-10072. TestNfsExports#testMultiMatchers fails due to non-deterministic
+    timing around cache expiry check. (cnauroth)
+
+    HADOOP-9898. Set SO_KEEPALIVE on all our sockets. (todd via wang)
+
+    HADOOP-9478. Fix race conditions during the initialization of Configuration
+    related to deprecatedKeyMap (cmccabe)
+
+    HADOOP-9660. [WINDOWS] Powershell / cmd parses -Dkey=value from command line
+    as [-Dkey, value] which breaks GenericsOptionParser.
+    (Enis Soztutar via cnauroth)
+
+    HADOOP-10078. KerberosAuthenticator always does SPNEGO. (rkanter via tucu)
+
+    HADOOP-10110. hadoop-auth has a build break due to missing dependency.
+    (Chuan Liu via arp)
+
+    HADOOP-9114. After defined the dfs.checksum.type as the NULL, write file and hflush will 
+    through java.lang.ArrayIndexOutOfBoundsException (Sathish via umamahesh)
+
+    HADOOP-10130. RawLocalFS::LocalFSFileInputStream.pread does not track
+    FS::Statistics (Binglin Chang via Colin Patrick McCabe)
+
+    HDFS-5560. Trash configuration log statements prints incorrect units.
+    (Josh Elser via Andrew Wang)
+
+    HADOOP-10081. Client.setupIOStreams can leak socket resources on exception
+    or error (Tsuyoshi OZAWA via jlowe)
+
+    HADOOP-10087. UserGroupInformation.getGroupNames() fails to return primary
+    group first when JniBasedUnixGroupsMappingWithFallback is used (cmccabe)
+
+Release 2.2.0 - 2013-10-13
+
+  INCOMPATIBLE CHANGES
+
+  NEW FEATURES
+
+  IMPROVEMENTS
+
+    HADOOP-9948. Add a config value to CLITestHelper to skip tests on Windows.
+    (Chuan Liu via cnauroth)
+
+    HADOOP-9976. Different versions of avro and avro-maven-plugin (Karthik
+    Kambatla via Sandy Ryza)
+
+    HADOOP-9758.  Provide configuration option for FileSystem/FileContext
+    symlink resolution.  (Andrew Wang via Colin Patrick McCabe)
+
+    HADOOP-8315. Support SASL-authenticated ZooKeeper in ActiveStandbyElector
+    (todd)
+
   OPTIMIZATIONS
 
   BUG FIXES
+
+    HADOOP-9776. HarFileSystem.listStatus() returns invalid authority if port
+    number is empty. (Shanyu Zhao via ivanmi)
+
+    HADOOP-9761.  ViewFileSystem#rename fails when using DistributedFileSystem.
+    (Andrew Wang via Colin Patrick McCabe)
+
+    HADOOP-10003. HarFileSystem.listLocatedStatus() fails.
+    (Jason Dere and suresh via suresh)
+
+    HADOOP-10017. Fix NPE in DFSClient#getDelegationToken when doing Distcp 
+    from a secured cluster to an insecured cluster. (Haohui Mai via jing9)
 
 Release 2.1.1-beta - 2013-09-23
 
@@ -498,6 +691,12 @@ Release 2.1.1-beta - 2013-09-23
 
     HADOOP-9961. versions of a few transitive dependencies diverged between hadoop 
     subprojects. (rvs via tucu)
+
+    HADOOP-9977. Hadoop services won't start with different keypass and
+    keystorepass when https is enabled. (cnauroth)
+
+    HADOOP-10005. No need to check INFO severity level is enabled or not.
+    (Jackie Chang via suresh)
 
 Release 2.1.0-beta - 2013-08-22
 
@@ -2149,6 +2348,20 @@ Release 2.0.0-alpha - 05-23-2012
     HADOOP-7606. Upgrade Jackson to version 1.7.1 to match the version required
     by Jersey (Alejandro Abdelnur via atm)
 
+Release 0.23.11 - UNRELEASED
+
+  INCOMPATIBLE CHANGES
+
+  NEW FEATURES
+    
+  IMPROVEMENTS
+    
+  OPTIMIZATIONS
+
+  BUG FIXES
+
+    HADOOP-10129. Distcp may succeed when it fails (daryn)
+
 Release 0.23.10 - UNRELEASED
 
   INCOMPATIBLE CHANGES
@@ -2163,6 +2376,10 @@ Release 0.23.10 - UNRELEASED
     HADOOP-8704. add request logging to jetty/httpserver (jeagles)
 
   OPTIMIZATIONS
+
+    HADOOP-9956. RPC listener inefficiently assigns connections to readers (daryn)
+
+    HADOOP-9955. RPC idle connection closing is extremely inefficient (daryn)
 
   BUG FIXES
 

@@ -24,6 +24,7 @@ import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
@@ -38,13 +39,20 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
+import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.RMServerUtils;
@@ -57,6 +65,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo.FifoScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppAttemptInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppAttemptsInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppInfo;
@@ -83,20 +92,25 @@ import com.google.inject.Singleton;
 @Singleton
 @Path("/ws/v1/cluster")
 public class RMWebServices {
+  private static final Log LOG =
+      LogFactory.getLog(RMWebServices.class.getName());
   private static final String EMPTY = "";
   private static final String ANY = "*";
   private final ResourceManager rm;
   private static RecordFactory recordFactory = RecordFactoryProvider
       .getRecordFactory(null);
   private final ApplicationACLsManager aclsManager;
+  private final QueueACLsManager queueACLsManager;
 
   private @Context HttpServletResponse response;
 
   @Inject
   public RMWebServices(final ResourceManager rm,
-      final ApplicationACLsManager aclsManager) {
+      final ApplicationACLsManager aclsManager,
+      final QueueACLsManager queueACLsManager) {
     this.rm = rm;
     this.aclsManager = aclsManager;
+    this.queueACLsManager = queueACLsManager;
   }
 
   protected Boolean hasAccess(RMApp app, HttpServletRequest hsr) {
@@ -107,9 +121,10 @@ public class RMWebServices {
       callerUGI = UserGroupInformation.createRemoteUser(remoteUser);
     }
     if (callerUGI != null
-        && !this.aclsManager.checkAccess(callerUGI,
+        && !(this.aclsManager.checkAccess(callerUGI,
             ApplicationAccessType.VIEW_APP, app.getUser(),
-            app.getApplicationId())) {
+            app.getApplicationId()) || this.queueACLsManager.checkAccess(
+            callerUGI, QueueACL.ADMINISTER_QUEUE, app.getQueue()))) {
       return false;
     }
     return true;
@@ -247,7 +262,6 @@ public class RMWebServices {
       @QueryParam("finishedTimeBegin") String finishBegin,
       @QueryParam("finishedTimeEnd") String finishEnd,
       @QueryParam("applicationTypes") Set<String> applicationTypes) {
-    long num = 0;
     boolean checkCount = false;
     boolean checkStart = false;
     boolean checkEnd = false;
@@ -322,19 +336,66 @@ public class RMWebServices {
       checkAppStates = true;
     }
 
-    final ConcurrentMap<ApplicationId, RMApp> apps = rm.getRMContext()
-        .getRMApps();
+    GetApplicationsRequest request = GetApplicationsRequest.newInstance();
+
+    if (checkStart) {
+      request.setStartRange(sBegin, sEnd);
+    }
+
+    if (checkEnd) {
+      request.setFinishRange(fBegin, fEnd);
+    }
+
+    if (checkCount) {
+      request.setLimit(countNum);
+    }
+
+    if (checkAppTypes) {
+      request.setApplicationTypes(appTypes);
+    }
+
+    if (checkAppStates) {
+      request.setApplicationStates(appStates);
+    }
+
+    if (queueQuery != null && !queueQuery.isEmpty()) {
+      ResourceScheduler rs = rm.getResourceScheduler();
+      if (rs instanceof CapacityScheduler) {
+        CapacityScheduler cs = (CapacityScheduler) rs;
+        // validate queue exists
+        try {
+          cs.getQueueInfo(queueQuery, false, false);
+        } catch (IOException e) {
+          throw new BadRequestException(e.getMessage());
+        }
+      }
+      Set<String> queues = new HashSet<String>(1);
+      queues.add(queueQuery);
+      request.setQueues(queues);
+    }
+
+    if (userQuery != null && !userQuery.isEmpty()) {
+      Set<String> users = new HashSet<String>(1);
+      users.add(userQuery);
+      request.setUsers(users);
+    }
+
+    List<ApplicationReport> appReports = null;
+    try {
+      appReports = rm.getClientRMService()
+          .getApplications(request, false).getApplicationList();
+    } catch (YarnException e) {
+      LOG.error("Unable to retrieve apps from ClientRMService", e);
+      throw new YarnRuntimeException(
+          "Unable to retrieve apps from ClientRMService", e);
+    }
+
+    final ConcurrentMap<ApplicationId, RMApp> apps =
+        rm.getRMContext().getRMApps();
     AppsInfo allApps = new AppsInfo();
-    for (RMApp rmapp : apps.values()) {
+    for (ApplicationReport report : appReports) {
+      RMApp rmapp = apps.get(report.getApplicationId());
 
-      if (checkCount && num == countNum) {
-        break;
-      }
-
-      if (checkAppStates && !appStates.contains(
-          rmapp.createApplicationState().toString().toLowerCase())) {
-        continue;
-      }
       if (finalStatusQuery != null && !finalStatusQuery.isEmpty()) {
         FinalApplicationStatus.valueOf(finalStatusQuery);
         if (!rmapp.getFinalApplicationStatus().toString()
@@ -342,43 +403,9 @@ public class RMWebServices {
           continue;
         }
       }
-      if (userQuery != null && !userQuery.isEmpty()) {
-        if (!rmapp.getUser().equals(userQuery)) {
-          continue;
-        }
-      }
-      if (queueQuery != null && !queueQuery.isEmpty()) {
-        ResourceScheduler rs = rm.getResourceScheduler();
-        if (rs instanceof CapacityScheduler) {
-          CapacityScheduler cs = (CapacityScheduler) rs;
-          // validate queue exists
-          try {
-            cs.getQueueInfo(queueQuery, false, false);
-          } catch (IOException e) {
-            throw new BadRequestException(e.getMessage());
-          }
-        }
-        if (!rmapp.getQueue().equals(queueQuery)) {
-          continue;
-        }
-      }
-      if (checkAppTypes && !appTypes.contains(
-          rmapp.getApplicationType().trim().toLowerCase())) {
-        continue;
-      }
 
-      if (checkStart
-          && (rmapp.getStartTime() < sBegin || rmapp.getStartTime() > sEnd)) {
-        continue;
-      }
-      if (checkEnd
-          && (rmapp.getFinishTime() < fBegin || rmapp.getFinishTime() > fEnd)) {
-        continue;
-      }
       AppInfo app = new AppInfo(rmapp, hasAccess(rmapp, hsr));
-
       allApps.add(app);
-      num++;
     }
     return allApps;
   }

@@ -55,7 +55,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.commons</groupId>
-      <artifactId>commons-math</artifactId>
+      <artifactId>commons-math3</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -81,6 +81,11 @@
     <dependency>
       <groupId>commons-net</groupId>
       <artifactId>commons-net</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>commons-collections</groupId>
+      <artifactId>commons-collections</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -212,6 +217,11 @@
     <dependency>
       <groupId>com.jcraft</groupId>
       <artifactId>jsch</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.google.code.findbugs</groupId>
+      <artifactId>jsr305</artifactId>
+      <scope>compile</scope>
     </dependency>
 
     <dependency>
@@ -464,6 +474,10 @@
             <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4hc.c</exclude>
             <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4hc_encoder.h</exclude>
             <exclude>src/test/java/org/apache/hadoop/fs/test-untar.tgz</exclude>
+            <exclude>src/test/resources/test.har/_SUCCESS</exclude>
+            <exclude>src/test/resources/test.har/_index</exclude>
+            <exclude>src/test/resources/test.har/_masterindex</exclude>
+            <exclude>src/test/resources/test.har/part-0</exclude>
           </excludes>
         </configuration>
       </plugin>

@@ -39,8 +39,8 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
-import org.apache.hadoop.hdfs.HftpFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.web.HftpFileSystem;
 import org.apache.hadoop.hdfs.web.WebHdfsTestUtil;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.security.AccessControlException;
@@ -163,7 +163,7 @@ public class TestAuditLogs {
 
     setupAuditLogs();
 
-    WebHdfsFileSystem webfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(userGroupInfo, conf);
+    WebHdfsFileSystem webfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(userGroupInfo, conf, WebHdfsFileSystem.SCHEME);
     InputStream istream = webfs.open(file);
     int val = istream.read();
     istream.close();
@@ -182,7 +182,7 @@ public class TestAuditLogs {
 
     setupAuditLogs();
 
-    WebHdfsFileSystem webfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(userGroupInfo, conf);
+    WebHdfsFileSystem webfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(userGroupInfo, conf, WebHdfsFileSystem.SCHEME);
     FileStatus st = webfs.getFileStatus(file);
 
     verifyAuditLogs(true);
@@ -222,7 +222,7 @@ public class TestAuditLogs {
 
     setupAuditLogs();
     try {
-      WebHdfsFileSystem webfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(userGroupInfo, conf);
+      WebHdfsFileSystem webfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(userGroupInfo, conf, WebHdfsFileSystem.SCHEME);
       InputStream istream = webfs.open(file);
       int val = istream.read();
       fail("open+read must not succeed, got " + val);

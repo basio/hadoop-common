@@ -23,10 +23,12 @@ import java.util.concurrent.Executors;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.jboss.netty.bootstrap.ServerBootstrap;
+import org.jboss.netty.channel.Channel;
 import org.jboss.netty.channel.ChannelFactory;
 import org.jboss.netty.channel.ChannelPipeline;
 import org.jboss.netty.channel.ChannelPipelineFactory;
 import org.jboss.netty.channel.Channels;
+import org.jboss.netty.channel.SimpleChannelUpstreamHandler;
 import org.jboss.netty.channel.socket.nio.NioServerSocketChannelFactory;
 
 /**
@@ -35,8 +37,8 @@ import org.jboss.netty.channel.socket.nio.NioServerSocketChannelFactory;
 public class SimpleTcpServer {
   public static final Log LOG = LogFactory.getLog(SimpleTcpServer.class);
   protected final int port;
-  protected final ChannelPipelineFactory pipelineFactory;
-  protected final RpcProgram rpcProgram;
+  protected int boundPort = -1; // Will be set after server starts
+  protected final SimpleChannelUpstreamHandler rpcProgram;
   
   /** The maximum number of I/O worker threads */
   protected final int workerCount;
@@ -50,18 +52,6 @@ public class SimpleTcpServer {
     this.port = port;
     this.rpcProgram = program;
     this.workerCount = workercount;
-    this.pipelineFactory = getPipelineFactory();
-  }
-
-  public ChannelPipelineFactory getPipelineFactory() {
-    return new ChannelPipelineFactory() {
-      @Override
-      public ChannelPipeline getPipeline() {
-        return Channels.pipeline(
-            RpcUtil.constructRpcFrameDecoder(),
-            new SimpleTcpServerHandler(rpcProgram));
-      }
-    };
   }
   
   public void run() {
@@ -78,14 +68,29 @@ public class SimpleTcpServer {
     }
     
     ServerBootstrap bootstrap = new ServerBootstrap(factory);
-    bootstrap.setPipelineFactory(pipelineFactory);
+    bootstrap.setPipelineFactory(new ChannelPipelineFactory() {
+
+      @Override
+      public ChannelPipeline getPipeline() throws Exception {
+        return Channels.pipeline(RpcUtil.constructRpcFrameDecoder(),
+            RpcUtil.STAGE_RPC_MESSAGE_PARSER, rpcProgram,
+            RpcUtil.STAGE_RPC_TCP_RESPONSE);
+      }
+    });
     bootstrap.setOption("child.tcpNoDelay", true);
     bootstrap.setOption("child.keepAlive", true);
     
     // Listen to TCP port
-    bootstrap.bind(new InetSocketAddress(port));
-
-    LOG.info("Started listening to TCP requests at port " + port + " for "
+    Channel ch = bootstrap.bind(new InetSocketAddress(port));
+    InetSocketAddress socketAddr = (InetSocketAddress) ch.getLocalAddress();
+    boundPort = socketAddr.getPort();
+    
+    LOG.info("Started listening to TCP requests at port " + boundPort + " for "
         + rpcProgram + " with workerCount " + workerCount);
+  }
+  
+  // boundPort will be set only after server starts
+  public int getBoundPort() {
+    return this.boundPort;
   }
 }

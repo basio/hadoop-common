@@ -55,6 +55,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
+import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
 import org.apache.hadoop.yarn.api.records.LocalResourceVisibility;
@@ -65,6 +66,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
+import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor;
 import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor.ExitCode;
 import org.apache.hadoop.yarn.server.nodemanager.Context;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.AuxServicesEvent;
@@ -72,6 +74,7 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.AuxServicesEve
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Application;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEventType;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainersLauncher;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainersLauncherEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainersLauncherEventType;
@@ -296,8 +299,7 @@ public class TestContainer {
       wc.launchContainer();
       reset(wc.localizerBus);
       wc.killContainer();
-      assertEquals(ContainerState.CONTAINER_CLEANEDUP_AFTER_KILL,
-          wc.c.getContainerState());
+      assertEquals(ContainerState.KILLING, wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       wc.containerKilledOnRequest();
       
@@ -330,15 +332,44 @@ public class TestContainer {
   }
 
   @Test
-  public void testKillOnLocalized() throws Exception {
+  public void testKillOnLocalizedWhenContainerNotLaunched() throws Exception {
     WrappedContainer wc = null;
     try {
       wc = new WrappedContainer(17, 314159265358979L, 4344, "yak");
       wc.initContainer();
       wc.localizeResources();
       assertEquals(ContainerState.LOCALIZED, wc.c.getContainerState());
+      ContainerLaunch launcher = wc.launcher.running.get(wc.c.getContainerId());
       wc.killContainer();
+      assertEquals(ContainerState.KILLING, wc.c.getContainerState());
+      launcher.call();
+      wc.drainDispatcherEvents();
       assertEquals(ContainerState.CONTAINER_CLEANEDUP_AFTER_KILL,
+          wc.c.getContainerState());
+      assertNull(wc.c.getLocalizedResources());
+      verifyCleanupCall(wc);
+    } finally {
+      if (wc != null) {
+        wc.finished();
+      }
+    }
+  }
+
+  @Test
+  public void testKillOnLocalizedWhenContainerLaunched() throws Exception {
+    WrappedContainer wc = null;
+    try {
+      wc = new WrappedContainer(17, 314159265358979L, 4344, "yak");
+      wc.initContainer();
+      wc.localizeResources();
+      assertEquals(ContainerState.LOCALIZED, wc.c.getContainerState());
+      ContainerLaunch launcher = wc.launcher.running.get(wc.c.getContainerId());
+      launcher.call();
+      wc.drainDispatcherEvents();
+      assertEquals(ContainerState.EXITED_WITH_FAILURE,
+          wc.c.getContainerState());
+      wc.killContainer();
+      assertEquals(ContainerState.EXITED_WITH_FAILURE,
           wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       verifyCleanupCall(wc);
@@ -472,12 +503,10 @@ public class TestContainer {
       wc.initContainer();
       wc.localizeResources();
       wc.killContainer();
-      assertEquals(ContainerState.CONTAINER_CLEANEDUP_AFTER_KILL,
-          wc.c.getContainerState());
+      assertEquals(ContainerState.KILLING, wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       wc.launchContainer();
-      assertEquals(ContainerState.CONTAINER_CLEANEDUP_AFTER_KILL,
-          wc.c.getContainerState());
+      assertEquals(ContainerState.KILLING, wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       wc.containerKilledOnRequest();
       verifyCleanupCall(wc);
@@ -650,7 +679,9 @@ public class TestContainer {
       Context context = mock(Context.class);
       when(context.getApplications()).thenReturn(
           new ConcurrentHashMap<ApplicationId, Application>());
-      launcher = new ContainersLauncher(context, dispatcher, null, null, null);
+      ContainerExecutor executor = mock(ContainerExecutor.class);
+      launcher =
+          new ContainersLauncher(context, dispatcher, executor, null, null);
       // create a mock ExecutorService, which will not really launch
       // ContainerLaunch at all.
       launcher.containerLauncher = mock(ExecutorService.class);
@@ -814,9 +845,13 @@ public class TestContainer {
     }
 
     public void containerFailed(int exitCode) {
+      String diagnosticMsg = "Container completed with exit code " + exitCode;
       c.handle(new ContainerExitEvent(cId,
           ContainerEventType.CONTAINER_EXITED_WITH_FAILURE, exitCode,
-          "Container completed with exit code " + exitCode));
+          diagnosticMsg));
+      ContainerStatus containerStatus = c.cloneAndGetContainerStatus();
+      assert containerStatus.getDiagnostics().contains(diagnosticMsg);
+      assert containerStatus.getExitStatus() == exitCode;
       drainDispatcherEvents();
     }
 
@@ -827,9 +862,13 @@ public class TestContainer {
 
     public void containerKilledOnRequest() {
       int exitCode = ExitCode.FORCE_KILLED.getExitCode();
+      String diagnosticMsg = "Container completed with exit code " + exitCode;
       c.handle(new ContainerExitEvent(cId,
           ContainerEventType.CONTAINER_KILLED_ON_REQUEST, exitCode,
-          "Container completed with exit code " + exitCode));
+          diagnosticMsg));
+      ContainerStatus containerStatus = c.cloneAndGetContainerStatus();
+      assert containerStatus.getDiagnostics().contains(diagnosticMsg);
+      assert containerStatus.getExitStatus() == exitCode; 
       drainDispatcherEvents();
     }
     

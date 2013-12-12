@@ -27,6 +27,10 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ha.HAServiceProtocol;
+import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
+import org.apache.hadoop.http.HttpConfig;
+import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
 import org.apache.hadoop.security.SecurityUtil;
@@ -41,6 +45,7 @@ import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
@@ -54,6 +59,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.NullRMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreFactory;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreOperationFailedEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStoreOperationFailedEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.Recoverable;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
@@ -77,6 +84,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.security.AMRMTokenSecretMan
 import org.apache.hadoop.yarn.server.resourcemanager.security.ClientToAMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
+import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMDelegationTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.RMWebApp;
@@ -88,6 +96,7 @@ import org.apache.hadoop.yarn.server.webproxy.WebAppProxyServlet;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.WebApps;
 import org.apache.hadoop.yarn.webapp.WebApps.Builder;
+import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -112,7 +121,9 @@ public class ResourceManager extends CompositeService implements Recoverable {
    * the HA state of the RM.
    */
   @VisibleForTesting
-  protected RMHAProtocolService haService;
+  protected RMContextImpl rmContext;
+  @VisibleForTesting
+  protected AdminService adminService;
 
   /**
    * "Active" services. Services that need to run only on the Active RM.
@@ -123,8 +134,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
    * in Active state.
    */
   protected RMActiveServices activeServices;
-  protected ClientToAMTokenSecretManagerInRM clientToAMSecretManager =
-      new ClientToAMTokenSecretManagerInRM();
+  protected ClientToAMTokenSecretManagerInRM clientToAMSecretManager;
 
   protected RMContainerTokenSecretManager containerTokenSecretManager;
   protected NMTokenSecretManagerInRM nmTokenSecretManager;
@@ -137,17 +147,16 @@ public class ResourceManager extends CompositeService implements Recoverable {
   private ClientRMService clientRM;
   protected ApplicationMasterService masterService;
   private ApplicationMasterLauncher applicationMasterLauncher;
-  private AdminService adminService;
   private ContainerAllocationExpirer containerAllocationExpirer;
   protected NMLivelinessMonitor nmLivelinessMonitor;
   protected NodesListManager nodesListManager;
   private EventHandler<SchedulerEvent> schedulerDispatcher;
   protected RMAppManager rmAppManager;
   protected ApplicationACLsManager applicationACLsManager;
+  protected QueueACLsManager queueACLsManager;
   protected RMDelegationTokenSecretManager rmDTSecretManager;
   private DelegationTokenRenewer delegationTokenRenewer;
   private WebApp webApp;
-  protected RMContext rmContext;
   protected ResourceTrackerService resourceTracker;
   private boolean recoveryEnabled;
 
@@ -158,7 +167,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
   public ResourceManager() {
     super("ResourceManager");
   }
-  
+
   public RMContext getRMContext() {
     return this.rmContext;
   }
@@ -166,21 +175,40 @@ public class ResourceManager extends CompositeService implements Recoverable {
   public static long getClusterTimeStamp() {
     return clusterTimeStamp;
   }
-  
+
+  @VisibleForTesting
+  protected static void setClusterTimeStamp(long timestamp) {
+    clusterTimeStamp = timestamp;
+  }
+
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
     validateConfigs(conf);
     this.conf = conf;
+    this.rmContext = new RMContextImpl();
 
-    haService = new RMHAProtocolService(this);
-    addService(haService);
+    adminService = createAdminService();
+    addService(adminService);
+    rmContext.setRMAdminService(adminService);
+
+    this.rmContext.setHAEnabled(HAUtil.isHAEnabled(conf));
+    if (this.rmContext.isHAEnabled()) {
+      HAUtil.verifyAndSetConfiguration(conf);
+    }
+    createAndInitActiveServices();
+
     super.serviceInit(conf);
   }
   
+  protected QueueACLsManager createQueueACLsManager(ResourceScheduler scheduler,
+      Configuration conf) {
+    return new QueueACLsManager(scheduler, conf);
+  }
+
   @VisibleForTesting
   protected void setRMStateStore(RMStateStore rmStore) {
     rmStore.setRMDispatcher(rmDispatcher);
-    ((RMContextImpl) rmContext).setStateStore(rmStore);
+    rmContext.setStateStore(rmStore);
   }
 
   protected RMContainerTokenSecretManager createContainerTokenSecretManager(
@@ -195,6 +223,11 @@ public class ResourceManager extends CompositeService implements Recoverable {
   
   protected EventHandler<SchedulerEvent> createSchedulerEventDispatcher() {
     return new SchedulerEventDispatcher(this.scheduler);
+  }
+
+  protected RMStateStoreOperationFailedEventDispatcher
+      createRMStateStoreOperationFailedEventDispatcher() {
+    return new RMStateStoreOperationFailedEventDispatcher(rmContext, this);
   }
 
   protected Dispatcher createDispatcher() {
@@ -289,20 +322,31 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
       rmDispatcher = createDispatcher();
       addIfService(rmDispatcher);
+      rmContext.setDispatcher(rmDispatcher);
+
+      clientToAMSecretManager = new ClientToAMTokenSecretManagerInRM();
+      rmContext.setClientToAMTokenSecretManager(clientToAMSecretManager);
 
       amRmTokenSecretManager = createAMRMTokenSecretManager(conf);
+      rmContext.setAMRMTokenSecretManager(amRmTokenSecretManager);
 
       containerAllocationExpirer = new ContainerAllocationExpirer(rmDispatcher);
       addService(containerAllocationExpirer);
+      rmContext.setContainerAllocationExpirer(containerAllocationExpirer);
 
       AMLivelinessMonitor amLivelinessMonitor = createAMLivelinessMonitor();
       addService(amLivelinessMonitor);
+      rmContext.setAMLivelinessMonitor(amLivelinessMonitor);
 
       AMLivelinessMonitor amFinishingMonitor = createAMLivelinessMonitor();
       addService(amFinishingMonitor);
+      rmContext.setAMFinishingMonitor(amFinishingMonitor);
 
       containerTokenSecretManager = createContainerTokenSecretManager(conf);
+      rmContext.setContainerTokenSecretManager(containerTokenSecretManager);
+
       nmTokenSecretManager = createNMTokenSecretManager(conf);
+      rmContext.setNMTokenSecretManager(nmTokenSecretManager);
 
       boolean isRecoveryEnabled = conf.getBoolean(
           YarnConfiguration.RECOVERY_ENABLED,
@@ -320,30 +364,31 @@ public class ResourceManager extends CompositeService implements Recoverable {
       try {
         rmStore.init(conf);
         rmStore.setRMDispatcher(rmDispatcher);
+        rmDispatcher.register(RMStateStoreOperationFailedEventType.class,
+            createRMStateStoreOperationFailedEventDispatcher());
       } catch (Exception e) {
         // the Exception from stateStore.init() needs to be handled for
         // HA and we need to give up master status if we got fenced
         LOG.error("Failed to init state store", e);
-        ExitUtil.terminate(1, e);
+        throw e;
       }
+      rmContext.setStateStore(rmStore);
 
       if (UserGroupInformation.isSecurityEnabled()) {
         delegationTokenRenewer = createDelegationTokenRenewer();
+        rmContext.setDelegationTokenRenewer(delegationTokenRenewer);
       }
-
-      rmContext = new RMContextImpl(
-          rmDispatcher, rmStore, containerAllocationExpirer, amLivelinessMonitor,
-          amFinishingMonitor, delegationTokenRenewer, amRmTokenSecretManager,
-          containerTokenSecretManager, nmTokenSecretManager,
-          clientToAMSecretManager);
 
       // Register event handler for NodesListManager
       nodesListManager = new NodesListManager(rmContext);
       rmDispatcher.register(NodesListManagerEventType.class, nodesListManager);
       addService(nodesListManager);
+      rmContext.setNodesListManager(nodesListManager);
 
       // Initialize the scheduler
       scheduler = createScheduler();
+      rmContext.setScheduler(scheduler);
+
       schedulerDispatcher = createSchedulerEventDispatcher();
       addIfService(schedulerDispatcher);
       rmDispatcher.register(SchedulerEventType.class, schedulerDispatcher);
@@ -365,6 +410,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
       resourceTracker = createResourceTrackerService();
       addService(resourceTracker);
+      rmContext.setResourceTrackerService(resourceTracker);
 
       DefaultMetricsSystem.initialize("ResourceManager");
       JvmMetrics.initSingleton("ResourceManager", null);
@@ -380,20 +426,22 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
       masterService = createApplicationMasterService();
       addService(masterService) ;
+      rmContext.setApplicationMasterService(masterService);
 
       applicationACLsManager = new ApplicationACLsManager(conf);
+
+      queueACLsManager = createQueueACLsManager(scheduler, conf);
 
       rmAppManager = createRMAppManager();
       // Register event handler for RMAppManagerEvents
       rmDispatcher.register(RMAppManagerEventType.class, rmAppManager);
       rmDTSecretManager = createRMDelegationTokenSecretManager(rmContext);
       rmContext.setRMDelegationTokenSecretManager(rmDTSecretManager);
+
       clientRM = createClientRMService();
       rmContext.setClientRMService(clientRM);
       addService(clientRM);
-
-      adminService = createAdminService(clientRM, masterService, resourceTracker);
-      addService(adminService);
+      rmContext.setClientRMService(clientRM);
 
       applicationMasterLauncher = createAMLauncher();
       rmDispatcher.register(AMLauncherEventType.class,
@@ -423,13 +471,14 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
       if(recoveryEnabled) {
         try {
+          rmStore.checkVersion();
           RMState state = rmStore.loadState();
           recover(state);
         } catch (Exception e) {
           // the Exception from loadState() needs to be handled for
           // HA and we need to give up master status if we got fenced
           LOG.error("Failed to load/recover state", e);
-          ExitUtil.terminate(1, e);
+          throw e;
         }
       }
 
@@ -441,12 +490,8 @@ public class ResourceManager extends CompositeService implements Recoverable {
       }
 
       if (getConfig().getBoolean(YarnConfiguration.IS_MINI_YARN_CLUSTER, false)) {
-        String hostname = getConfig().get(YarnConfiguration.RM_WEBAPP_ADDRESS,
-            YarnConfiguration.DEFAULT_RM_WEBAPP_ADDRESS);
-        hostname = (hostname.contains(":")) ? hostname.substring(0, hostname.indexOf(":")) : hostname;
         int port = webApp.port();
-        String resolvedAddress = hostname + ":" + port;
-        conf.set(YarnConfiguration.RM_WEBAPP_ADDRESS, resolvedAddress);
+        WebAppUtils.setRMWebAppPort(conf, port);
       }
 
       super.serviceStart();
@@ -483,6 +528,36 @@ public class ResourceManager extends CompositeService implements Recoverable {
       }
 
       super.serviceStop();
+    }
+
+    protected void createPolicyMonitors() {
+      if (scheduler instanceof PreemptableResourceScheduler
+          && conf.getBoolean(YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS,
+          YarnConfiguration.DEFAULT_RM_SCHEDULER_ENABLE_MONITORS)) {
+        LOG.info("Loading policy monitors");
+        List<SchedulingEditPolicy> policies = conf.getInstances(
+            YarnConfiguration.RM_SCHEDULER_MONITOR_POLICIES,
+            SchedulingEditPolicy.class);
+        if (policies.size() > 0) {
+          rmDispatcher.register(ContainerPreemptEventType.class,
+              new RMContainerPreemptEventDispatcher(
+                  (PreemptableResourceScheduler) scheduler));
+          for (SchedulingEditPolicy policy : policies) {
+            LOG.info("LOADING SchedulingEditPolicy:" + policy.getPolicyName());
+            policy.init(conf, rmContext.getDispatcher().getEventHandler(),
+                (PreemptableResourceScheduler) scheduler);
+            // periodically check whether we need to take action to guarantee
+            // constraints
+            SchedulingMonitor mon = new SchedulingMonitor(policy);
+            addService(mon);
+          }
+        } else {
+          LOG.warn("Policy monitors configured (" +
+              YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS +
+              ") but none specified (" +
+              YarnConfiguration.RM_SCHEDULER_MONITOR_POLICIES + ")");
+        }
+      }
     }
   }
 
@@ -582,6 +657,47 @@ public class ResourceManager extends CompositeService implements Recoverable {
       } catch (InterruptedException e) {
         throw new YarnRuntimeException(e);
       }
+    }
+  }
+
+  @Private
+  public static class RMStateStoreOperationFailedEventDispatcher implements
+      EventHandler<RMStateStoreOperationFailedEvent> {
+
+    private final RMContext rmContext;
+    private final ResourceManager rm;
+
+    public RMStateStoreOperationFailedEventDispatcher(RMContext rmContext,
+        ResourceManager resourceManager) {
+      this.rmContext = rmContext;
+      this.rm = resourceManager;
+    }
+
+    @Override
+    public void handle(RMStateStoreOperationFailedEvent event) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Received a " +
+            RMStateStoreOperationFailedEvent.class.getName() + " of type " +
+            event.getType().name());
+      }
+      if (event.getType() == RMStateStoreOperationFailedEventType.FENCED) {
+        LOG.info("RMStateStore has been fenced");
+        if (rmContext.isHAEnabled()) {
+          try {
+            // Transition to standby and reinit active services
+            LOG.info("Transitioning RM to Standby mode");
+            rm.transitionToStandby(true);
+            return;
+          } catch (Exception e) {
+            LOG.error("Failed to transition RM to Standby mode.");
+          }
+        }
+      }
+
+      LOG.error("Shutting down RM on receiving a " +
+          RMStateStoreOperationFailedEvent.class.getName() + " of type " +
+          event.getType().name());
+      ExitUtil.terminate(1, event.getCause());
     }
   }
 
@@ -704,10 +820,9 @@ public class ResourceManager extends CompositeService implements Recoverable {
                 YarnConfiguration.RM_WEBAPP_SPNEGO_USER_NAME_KEY)
             .withHttpSpnegoKeytabKey(
                 YarnConfiguration.RM_WEBAPP_SPNEGO_KEYTAB_FILE_KEY)
-            .at(this.conf.get(YarnConfiguration.RM_WEBAPP_ADDRESS,
-        YarnConfiguration.DEFAULT_RM_WEBAPP_ADDRESS)); 
-    String proxyHostAndPort = YarnConfiguration.getProxyHostAndPort(conf);
-    if(YarnConfiguration.getRMWebAppHostAndPort(conf).
+            .at(WebAppUtils.getRMWebAppURLWithoutScheme(conf)); 
+    String proxyHostAndPort = WebAppUtils.getProxyHostAndPort(conf);
+    if(WebAppUtils.getResolvedRMWebAppURLWithoutScheme(conf).
         equals(proxyHostAndPort)) {
       AppReportFetcher fetcher = new AppReportFetcher(conf, getClientRMService());
       builder.withServlet(ProxyUriUtils.PROXY_SERVLET_NAME, 
@@ -749,12 +864,48 @@ public class ResourceManager extends CompositeService implements Recoverable {
     if (activeServices != null) {
       activeServices.stop();
       activeServices = null;
+      rmContext.getRMNodes().clear();
+      rmContext.getInactiveRMNodes().clear();
+      rmContext.getRMApps().clear();
     }
   }
 
   @VisibleForTesting
   protected boolean areActiveServicesRunning() {
     return activeServices != null && activeServices.isInState(STATE.STARTED);
+  }
+
+  synchronized void transitionToActive() throws Exception {
+    if (rmContext.getHAServiceState() ==
+        HAServiceProtocol.HAServiceState.ACTIVE) {
+      LOG.info("Already in active state");
+      return;
+    }
+
+    LOG.info("Transitioning to active state");
+    startActiveServices();
+    rmContext.setHAServiceState(HAServiceProtocol.HAServiceState.ACTIVE);
+    LOG.info("Transitioned to active state");
+  }
+
+  synchronized void transitionToStandby(boolean initialize)
+      throws Exception {
+    if (rmContext.getHAServiceState() ==
+        HAServiceProtocol.HAServiceState.STANDBY) {
+      LOG.info("Already in standby state");
+      return;
+    }
+
+    LOG.info("Transitioning to standby state");
+    if (rmContext.getHAServiceState() ==
+        HAServiceProtocol.HAServiceState.ACTIVE) {
+      stopActiveServices();
+      if (initialize) {
+        createAndInitActiveServices();
+      }
+    }
+    rmContext.setHAServiceState(HAServiceProtocol.HAServiceState.STANDBY);
+    LOG.info("Transitioned to standby state");
   }
 
   @Override
@@ -764,6 +915,13 @@ public class ResourceManager extends CompositeService implements Recoverable {
     } catch(IOException ie) {
       throw new YarnRuntimeException("Failed to login", ie);
     }
+
+    if (this.rmContext.isHAEnabled()) {
+      transitionToStandby(true);
+    } else {
+      transitionToActive();
+    }
+
     super.serviceStart();
   }
   
@@ -775,6 +933,8 @@ public class ResourceManager extends CompositeService implements Recoverable {
   @Override
   protected void serviceStop() throws Exception {
     super.serviceStop();
+    transitionToStandby(false);
+    rmContext.setHAServiceState(HAServiceState.STOPPING);
   }
   
   protected ResourceTrackerService createResourceTrackerService() {
@@ -801,51 +961,16 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
   protected ClientRMService createClientRMService() {
     return new ClientRMService(this.rmContext, scheduler, this.rmAppManager,
-        this.applicationACLsManager, this.rmDTSecretManager);
+        this.applicationACLsManager, this.queueACLsManager,
+        this.rmDTSecretManager);
   }
 
   protected ApplicationMasterService createApplicationMasterService() {
     return new ApplicationMasterService(this.rmContext, scheduler);
   }
 
-  protected void createPolicyMonitors() {
-    if (scheduler instanceof PreemptableResourceScheduler
-        && conf.getBoolean(YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS,
-          YarnConfiguration.DEFAULT_RM_SCHEDULER_ENABLE_MONITORS)) {
-      LOG.info("Loading policy monitors");
-      List<SchedulingEditPolicy> policies = conf.getInstances(
-              YarnConfiguration.RM_SCHEDULER_MONITOR_POLICIES,
-              SchedulingEditPolicy.class);
-      if (policies.size() > 0) {
-        this.rmDispatcher.register(ContainerPreemptEventType.class,
-          new RMContainerPreemptEventDispatcher(
-            (PreemptableResourceScheduler) scheduler));
-        for (SchedulingEditPolicy policy : policies) {
-          LOG.info("LOADING SchedulingEditPolicy:" + policy.getPolicyName());
-          policy.init(conf, this.rmContext.getDispatcher().getEventHandler(),
-              (PreemptableResourceScheduler) scheduler);
-          // periodically check whether we need to take action to guarantee
-          // constraints
-          SchedulingMonitor mon = new SchedulingMonitor(policy);
-          addService(mon);
-
-        }
-      } else {
-        LOG.warn("Policy monitors configured (" +
-            YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS +
-            ") but none specified (" +
-            YarnConfiguration.RM_SCHEDULER_MONITOR_POLICIES + ")");
-      }
-    }
-  }
-
-  protected AdminService createAdminService(
-      ClientRMService clientRMService, 
-      ApplicationMasterService applicationMasterService,
-      ResourceTrackerService resourceTrackerService) {
-    return new AdminService(this.conf, scheduler, rmContext,
-        this.nodesListManager, clientRMService, applicationMasterService,
-        resourceTrackerService);
+  protected AdminService createAdminService() {
+    return new AdminService(this, rmContext);
   }
 
   @Private
@@ -882,6 +1007,11 @@ public class ResourceManager extends CompositeService implements Recoverable {
   }
 
   @Private
+  public QueueACLsManager getQueueACLsManager() {
+    return this.queueACLsManager;
+  }
+
+  @Private
   public RMContainerTokenSecretManager getRMContainerTokenSecretManager() {
     return this.containerTokenSecretManager;
   }
@@ -904,7 +1034,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
     // recover applications
     rmAppManager.recover(state);
   }
-  
+
   public static void main(String argv[]) {
     Thread.setDefaultUncaughtExceptionHandler(new YarnUncaughtExceptionHandler());
     StringUtils.startupShutdownMessage(ResourceManager.class, argv, LOG);
@@ -914,11 +1044,18 @@ public class ResourceManager extends CompositeService implements Recoverable {
       ShutdownHookManager.get().addShutdownHook(
         new CompositeServiceShutdownHook(resourceManager),
         SHUTDOWN_HOOK_PRIORITY);
+      setHttpPolicy(conf);
       resourceManager.init(conf);
       resourceManager.start();
     } catch (Throwable t) {
       LOG.fatal("Error starting ResourceManager", t);
       System.exit(-1);
     }
+  }
+  
+  private static void setHttpPolicy(Configuration conf) {
+    HttpConfig.setPolicy(Policy.fromString(conf.get(
+      YarnConfiguration.YARN_HTTP_POLICY_KEY,
+      YarnConfiguration.YARN_HTTP_POLICY_DEFAULT)));
   }
 }

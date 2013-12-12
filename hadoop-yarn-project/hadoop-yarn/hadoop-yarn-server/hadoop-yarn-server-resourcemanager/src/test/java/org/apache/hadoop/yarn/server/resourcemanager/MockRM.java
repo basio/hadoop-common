@@ -107,7 +107,7 @@ public class MockRM extends ResourceManager {
       throws Exception {
     RMApp app = getRMContext().getRMApps().get(attemptId.getApplicationId());
     Assert.assertNotNull("app shouldn't be null", app);
-    RMAppAttempt attempt = app.getCurrentAppAttempt();
+    RMAppAttempt attempt = app.getRMAppAttempt(attemptId);
     int timeoutSecs = 0;
     while (!finalState.equals(attempt.getAppAttemptState()) && timeoutSecs++ < 40) {
       System.out.println("AppAttempt : " + attemptId 
@@ -163,6 +163,14 @@ public class MockRM extends ResourceManager {
   public RMApp submitApp(int masterMemory, String name, String user,
       Map<ApplicationAccessType, String> acls, boolean unmanaged, String queue,
       int maxAppAttempts, Credentials ts, String appType) throws Exception {
+    return submitApp(masterMemory, name, user, acls, unmanaged, queue,
+      maxAppAttempts, ts, appType, true);
+  }
+
+  public RMApp submitApp(int masterMemory, String name, String user,
+      Map<ApplicationAccessType, String> acls, boolean unmanaged, String queue,
+      int maxAppAttempts, Credentials ts, String appType,
+      boolean waitForAccepted) throws Exception {
     ApplicationClientProtocol client = getClientRMService();
     GetNewApplicationResponse resp = client.getNewApplication(Records
         .newRecord(GetNewApplicationRequest.class));
@@ -222,7 +230,9 @@ public class MockRM extends ResourceManager {
     }.setClientReq(client, req);
     fakeUser.doAs(action);
     // make sure app is immediately available after submit
-    waitForState(appId, RMAppState.ACCEPTED);
+    if (waitForAccepted) {
+      waitForState(appId, RMAppState.ACCEPTED);
+    }
     return getRMContext().getRMApps().get(appId);
   }
 
@@ -299,7 +309,8 @@ public class MockRM extends ResourceManager {
   @Override
   protected ClientRMService createClientRMService() {
     return new ClientRMService(getRMContext(), getResourceScheduler(),
-        rmAppManager, applicationACLsManager, rmDTSecretManager) {
+        rmAppManager, applicationACLsManager, queueACLsManager,
+        rmDTSecretManager) {
       @Override
       protected void serviceStart() {
         // override to not start rpc handler
@@ -370,19 +381,15 @@ public class MockRM extends ResourceManager {
   }
 
   @Override
-  protected AdminService createAdminService(ClientRMService clientRMService,
-      ApplicationMasterService applicationMasterService,
-      ResourceTrackerService resourceTrackerService) {
-    return new AdminService(getConfig(), scheduler, getRMContext(),
-        this.nodesListManager, clientRMService, applicationMasterService,
-        resourceTrackerService) {
+  protected AdminService createAdminService() {
+    return new AdminService(this, getRMContext()) {
       @Override
-      protected void serviceStart() {
+      protected void startServer() {
         // override to not start rpc handler
       }
 
       @Override
-      protected void serviceStop() {
+      protected void stopServer() {
         // don't do anything
       }
     };
@@ -398,6 +405,10 @@ public class MockRM extends ResourceManager {
 
   public ClientToAMTokenSecretManagerInRM getClientToAMTokenSecretManager() {
     return this.clientToAMSecretManager;
+  }
+
+  public RMAppManager getRMAppManager() {
+    return this.rmAppManager;
   }
 
   @Override

@@ -28,6 +28,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
@@ -67,13 +68,14 @@ public abstract class BlockPlacementPolicy {
    * @return array of DatanodeDescriptor instances chosen as target
    * and sorted as a pipeline.
    */
-  public abstract DatanodeDescriptor[] chooseTarget(String srcPath,
+  public abstract DatanodeStorageInfo[] chooseTarget(String srcPath,
                                              int numOfReplicas,
                                              Node writer,
-                                             List<DatanodeDescriptor> chosenNodes,
+                                             List<DatanodeStorageInfo> chosen,
                                              boolean returnChosenNodes,
                                              Set<Node> excludedNodes,
-                                             long blocksize);
+                                             long blocksize,
+                                             StorageType storageType);
   
   /**
    * Same as {@link #chooseTarget(String, int, Node, List, boolean, 
@@ -82,31 +84,33 @@ public abstract class BlockPlacementPolicy {
    *          is only a hint and due to cluster state, namenode may not be 
    *          able to place the blocks on these datanodes.
    */
-  DatanodeDescriptor[] chooseTarget(String src,
+  DatanodeStorageInfo[] chooseTarget(String src,
       int numOfReplicas, Node writer,
       Set<Node> excludedNodes,
-      long blocksize, List<DatanodeDescriptor> favoredNodes) {
+      long blocksize,
+      List<DatanodeDescriptor> favoredNodes,
+      StorageType storageType) {
     // This class does not provide the functionality of placing
     // a block in favored datanodes. The implementations of this class
     // are expected to provide this functionality
+
     return chooseTarget(src, numOfReplicas, writer, 
-        new ArrayList<DatanodeDescriptor>(numOfReplicas), false, excludedNodes, 
-        blocksize);
+        new ArrayList<DatanodeStorageInfo>(numOfReplicas), false,
+        excludedNodes, blocksize, storageType);
   }
 
   /**
-   * Verify that the block is replicated on at least minRacks different racks
-   * if there is more than minRacks rack in the system.
+   * Verify if the block's placement meets requirement of placement policy,
+   * i.e. replicas are placed on no less than minRacks racks in the system.
    * 
    * @param srcPath the full pathname of the file to be verified
    * @param lBlk block with locations
-   * @param minRacks number of racks the block should be replicated to
-   * @return the difference between the required and the actual number of racks
-   * the block is replicated to.
+   * @param numOfReplicas replica number of file to be verified
+   * @return the result of verification
    */
-  abstract public int verifyBlockPlacement(String srcPath,
-                                           LocatedBlock lBlk,
-                                           int minRacks);
+  abstract public BlockPlacementStatus verifyBlockPlacement(String srcPath,
+      LocatedBlock lBlk,
+      int numOfReplicas);
   /**
    * Decide whether deleting the specified replica of the block still makes 
    * the block conform to the configured block placement policy.

@@ -29,6 +29,7 @@ import static org.mockito.Mockito.spy;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Random;
 
@@ -40,9 +41,12 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSOutputStream;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
@@ -59,7 +63,6 @@ import org.apache.hadoop.hdfs.server.namenode.INodeMap;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference.WithCount;
 import org.apache.hadoop.hdfs.server.namenode.Quota;
-import org.apache.hadoop.hdfs.server.namenode.snapshot.FileWithSnapshot.FileDiff;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot.ChildrenDiff;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.INodeDirectoryWithSnapshot.DirectoryDiff;
 import org.apache.hadoop.hdfs.util.Diff.ListType;
@@ -102,6 +105,7 @@ public class TestRenameWithSnapshots {
   
   @Before
   public void setUp() throws Exception {
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCKSIZE);
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(REPL).format(true)
         .build();
     cluster.waitActive();
@@ -399,8 +403,7 @@ public class TestRenameWithSnapshots {
     final Path foo_s3 = SnapshotTestHelper.getSnapshotPath(sdir1, "s3",
         "foo");
     assertFalse(hdfs.exists(foo_s3));
-    INodeFileWithSnapshot sfoo = (INodeFileWithSnapshot) fsdir.getINode(
-        newfoo.toString()).asFile();
+    INodeFile sfoo = fsdir.getINode(newfoo.toString()).asFile();
     assertEquals("s2", sfoo.getDiffs().getLastSnapshot().getRoot()
         .getLocalName());
   }
@@ -600,8 +603,7 @@ public class TestRenameWithSnapshots {
     status = hdfs.getFileStatus(foo_s2);
     assertEquals(REPL, status.getReplication());
     
-    INodeFileWithSnapshot snode = (INodeFileWithSnapshot) fsdir.getINode(
-        newfoo.toString()).asFile();
+    INodeFile snode = fsdir.getINode(newfoo.toString()).asFile();
     assertEquals(1, snode.getDiffs().asList().size());
     assertEquals("s2", snode.getDiffs().getLastSnapshot().getRoot()
         .getLocalName());
@@ -759,8 +761,7 @@ public class TestRenameWithSnapshots {
         .asDirectory();
     assertEquals(1, foo.getDiffs().asList().size());
     assertEquals("s1", foo.getLastSnapshot().getRoot().getLocalName());
-    INodeFileWithSnapshot bar1 = (INodeFileWithSnapshot) fsdir.getINode4Write(
-        bar1_dir1.toString()).asFile();
+    INodeFile bar1 = fsdir.getINode4Write(bar1_dir1.toString()).asFile();
     assertEquals(1, bar1.getDiffs().asList().size());
     assertEquals("s1", bar1.getDiffs().getLastSnapshot().getRoot()
         .getLocalName());
@@ -770,7 +771,7 @@ public class TestRenameWithSnapshots {
     INodeReference.WithCount barWithCount = (WithCount) barRef
         .getReferredINode();
     assertEquals(2, barWithCount.getReferenceCount());
-    INodeFileWithSnapshot bar = (INodeFileWithSnapshot) barWithCount.asFile();
+    INodeFile bar = barWithCount.asFile();
     assertEquals(1, bar.getDiffs().asList().size());
     assertEquals("s1", bar.getDiffs().getLastSnapshot().getRoot()
         .getLocalName());
@@ -980,8 +981,7 @@ public class TestRenameWithSnapshots {
     assertEquals("s333", fooDiffs.get(2).snapshot.getRoot().getLocalName());
     assertEquals("s22", fooDiffs.get(1).snapshot.getRoot().getLocalName());
     assertEquals("s1", fooDiffs.get(0).snapshot.getRoot().getLocalName());
-    INodeFileWithSnapshot bar1 = (INodeFileWithSnapshot) fsdir.getINode4Write(
-        bar1_dir1.toString()).asFile();
+    INodeFile bar1 = fsdir.getINode4Write(bar1_dir1.toString()).asFile();
     List<FileDiff> bar1Diffs = bar1.getDiffs().asList();
     assertEquals(3, bar1Diffs.size());
     assertEquals("s333", bar1Diffs.get(2).snapshot.getRoot().getLocalName());
@@ -993,7 +993,7 @@ public class TestRenameWithSnapshots {
     INodeReference.WithCount barWithCount = (WithCount) barRef.getReferredINode();
     // 5 references: s1, s22, s333, s2222, current tree of sdir1
     assertEquals(5, barWithCount.getReferenceCount());
-    INodeFileWithSnapshot bar = (INodeFileWithSnapshot) barWithCount.asFile();
+    INodeFile bar = barWithCount.asFile();
     List<FileDiff> barDiffs = bar.getDiffs().asList();
     assertEquals(4, barDiffs.size());
     assertEquals("s2222", barDiffs.get(3).snapshot.getRoot().getLocalName());
@@ -1043,7 +1043,7 @@ public class TestRenameWithSnapshots {
     barRef = fsdir.getINode(bar_s2222.toString()).asReference();
     barWithCount = (WithCount) barRef.getReferredINode();
     assertEquals(4, barWithCount.getReferenceCount());
-    bar = (INodeFileWithSnapshot) barWithCount.asFile();
+    bar = barWithCount.asFile();
     barDiffs = bar.getDiffs().asList();
     assertEquals(4, barDiffs.size());
     assertEquals("s2222", barDiffs.get(3).snapshot.getRoot().getLocalName());
@@ -1185,13 +1185,15 @@ public class TestRenameWithSnapshots {
     assertFalse(hdfs.exists(bar_s2));
     restartClusterAndCheckImage(true);
     // make sure the whole referred subtree has been destroyed
-    assertEquals(4, fsdir.getRoot().getNamespace());
-    assertEquals(0, fsdir.getRoot().getDiskspace());
+    Quota.Counts q = fsdir.getRoot().getDirectoryWithQuotaFeature().getSpaceConsumed();  
+    assertEquals(4, q.get(Quota.NAMESPACE));
+    assertEquals(0, q.get(Quota.DISKSPACE));
     
     hdfs.deleteSnapshot(sdir1, "s1");
     restartClusterAndCheckImage(true);
-    assertEquals(3, fsdir.getRoot().getNamespace());
-    assertEquals(0, fsdir.getRoot().getDiskspace());
+    q = fsdir.getRoot().getDirectoryWithQuotaFeature().getSpaceConsumed();  
+    assertEquals(3, q.get(Quota.NAMESPACE));
+    assertEquals(0, q.get(Quota.DISKSPACE));
   }
   
   /**
@@ -1222,8 +1224,9 @@ public class TestRenameWithSnapshots {
       out.write(content);
       fooRef = fsdir.getINode4Write(foo2.toString());
       assertTrue(fooRef instanceof INodeReference.DstReference);
-      INode fooNode = fooRef.asFile();
-      assertTrue(fooNode instanceof INodeFileUnderConstructionWithSnapshot);
+      INodeFile fooNode = fooRef.asFile();
+      assertTrue(fooNode.isWithSnapshot());
+      assertTrue(fooNode.isUnderConstruction());
     } finally {
       if (out != null) {
         out.close();
@@ -1232,8 +1235,9 @@ public class TestRenameWithSnapshots {
     
     fooRef = fsdir.getINode4Write(foo2.toString());
     assertTrue(fooRef instanceof INodeReference.DstReference);
-    INode fooNode = fooRef.asFile();
-    assertTrue(fooNode instanceof INodeFileWithSnapshot);
+    INodeFile fooNode = fooRef.asFile();
+    assertTrue(fooNode.isWithSnapshot());
+    assertFalse(fooNode.isUnderConstruction());
     
     restartClusterAndCheckImage(true);
   }
@@ -1707,8 +1711,7 @@ public class TestRenameWithSnapshots {
     assertTrue(diff.getChildrenDiff().getList(ListType.CREATED).isEmpty());
     
     // bar was converted to filewithsnapshot while renaming
-    INodeFileWithSnapshot barNode = (INodeFileWithSnapshot) fsdir
-        .getINode4Write(bar.toString());
+    INodeFile barNode = fsdir.getINode4Write(bar.toString()).asFile();
     assertSame(barNode, children.get(0));
     assertSame(fooNode, barNode.getParent());
     List<FileDiff> barDiffList = barNode.getDiffs().asList();
@@ -1931,10 +1934,12 @@ public class TestRenameWithSnapshots {
     // check
     final INodeDirectorySnapshottable dir1Node = 
         (INodeDirectorySnapshottable) fsdir.getINode4Write(sdir1.toString());
-    assertEquals(4, dir1Node.getNamespace());
+    Quota.Counts q1 = dir1Node.getDirectoryWithQuotaFeature().getSpaceConsumed();  
+    assertEquals(4, q1.get(Quota.NAMESPACE));
     final INodeDirectorySnapshottable dir2Node = 
         (INodeDirectorySnapshottable) fsdir.getINode4Write(sdir2.toString());
-    assertEquals(2, dir2Node.getNamespace());
+    Quota.Counts q2 = dir2Node.getDirectoryWithQuotaFeature().getSpaceConsumed();  
+    assertEquals(2, q2.get(Quota.NAMESPACE));
     
     final Path foo_s1 = SnapshotTestHelper.getSnapshotPath(sdir1, "s1",
         foo.getName());
@@ -1998,10 +2003,12 @@ public class TestRenameWithSnapshots {
     final INodeDirectorySnapshottable dir1Node = 
         (INodeDirectorySnapshottable) fsdir.getINode4Write(sdir1.toString());
     // sdir1 + s1 + foo_s1 (foo) + foo (foo + s1 + bar~bar3)
-    assertEquals(9, dir1Node.getNamespace());
+    Quota.Counts q1 = dir1Node.getDirectoryWithQuotaFeature().getSpaceConsumed();  
+    assertEquals(9, q1.get(Quota.NAMESPACE));
     final INodeDirectorySnapshottable dir2Node = 
         (INodeDirectorySnapshottable) fsdir.getINode4Write(sdir2.toString());
-    assertEquals(2, dir2Node.getNamespace());
+    Quota.Counts q2 = dir2Node.getDirectoryWithQuotaFeature().getSpaceConsumed();  
+    assertEquals(2, q2.get(Quota.NAMESPACE));
     
     final Path foo_s1 = SnapshotTestHelper.getSnapshotPath(sdir1, "s1",
         foo.getName());
@@ -2241,6 +2248,97 @@ public class TestRenameWithSnapshots {
     assertSame(fooNode.asReference().getReferredINode(),
         fooNode_s2.getReferredINode());
     
+    restartClusterAndCheckImage(true);
+  }
+  
+  /**
+   * Make sure we clean the whole subtree under a DstReference node after 
+   * deleting a snapshot.
+   * see HDFS-5476.
+   */
+  @Test
+  public void testCleanDstReference() throws Exception {
+    final Path test = new Path("/test");
+    final Path foo = new Path(test, "foo");
+    final Path bar = new Path(foo, "bar");
+    hdfs.mkdirs(bar);
+    SnapshotTestHelper.createSnapshot(hdfs, test, "s0");
+    
+    // create file after s0 so that the file should not be included in s0
+    final Path fileInBar = new Path(bar, "file");
+    DFSTestUtil.createFile(hdfs, fileInBar, BLOCKSIZE, REPL, SEED);
+    // rename foo --> foo2
+    final Path foo2 = new Path(test, "foo2");
+    hdfs.rename(foo, foo2);
+    // create snapshot s1, note the file is included in s1
+    hdfs.createSnapshot(test, "s1");
+    // delete bar and foo2
+    hdfs.delete(new Path(foo2, "bar"), true);
+    hdfs.delete(foo2, true);
+    
+    final Path sfileInBar = SnapshotTestHelper.getSnapshotPath(test, "s1",
+        "foo2/bar/file");
+    assertTrue(hdfs.exists(sfileInBar));
+    
+    hdfs.deleteSnapshot(test, "s1");
+    assertFalse(hdfs.exists(sfileInBar));
+    
+    restartClusterAndCheckImage(true);
+    // make sure the file under bar is deleted 
+    final Path barInS0 = SnapshotTestHelper.getSnapshotPath(test, "s0",
+        "foo/bar");
+    INodeDirectoryWithSnapshot barNode = (INodeDirectoryWithSnapshot) fsdir
+        .getINode(barInS0.toString());
+    assertEquals(0, barNode.getChildrenList(null).size());
+    List<DirectoryDiff> diffList = barNode.getDiffs().asList();
+    assertEquals(1, diffList.size());
+    DirectoryDiff diff = diffList.get(0);
+    assertEquals(0, diff.getChildrenDiff().getList(ListType.DELETED).size());
+    assertEquals(0, diff.getChildrenDiff().getList(ListType.CREATED).size());
+  }
+
+  /**
+   * Rename of the underconstruction file in snapshot should not fail NN restart
+   * after checkpoint. Unit test for HDFS-5425.
+   */
+  @Test
+  public void testRenameUCFileInSnapshot() throws Exception {
+    final Path test = new Path("/test");
+    final Path foo = new Path(test, "foo");
+    final Path bar = new Path(foo, "bar");
+    hdfs.mkdirs(foo);
+    // create a file and keep it as underconstruction.
+    hdfs.create(bar);
+    SnapshotTestHelper.createSnapshot(hdfs, test, "s0");
+    // rename bar --> bar2
+    final Path bar2 = new Path(foo, "bar2");
+    hdfs.rename(bar, bar2);
+
+    // save namespace and restart
+    restartClusterAndCheckImage(true);
+  }
+  
+  /**
+   * Similar with testRenameUCFileInSnapshot, but do renaming first and then 
+   * append file without closing it. Unit test for HDFS-5425.
+   */
+  @Test
+  public void testAppendFileAfterRenameInSnapshot() throws Exception {
+    final Path test = new Path("/test");
+    final Path foo = new Path(test, "foo");
+    final Path bar = new Path(foo, "bar");
+    DFSTestUtil.createFile(hdfs, bar, BLOCKSIZE, REPL, SEED);
+    SnapshotTestHelper.createSnapshot(hdfs, test, "s0");
+    // rename bar --> bar2
+    final Path bar2 = new Path(foo, "bar2");
+    hdfs.rename(bar, bar2);
+    // append file and keep it as underconstruction.
+    FSDataOutputStream out = hdfs.append(bar2);
+    out.writeByte(0);
+    ((DFSOutputStream) out.getWrappedStream()).hsync(
+        EnumSet.of(SyncFlag.UPDATE_LENGTH));
+
+    // save namespace and restart
     restartClusterAndCheckImage(true);
   }
 }
