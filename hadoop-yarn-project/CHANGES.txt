@@ -194,6 +194,9 @@ Release 2.4.0 - UNRELEASED
     YARN-1541. Changed ResourceManager to invalidate ApplicationMaster host/port
     information once an AM crashes. (Jian He via vinodkv)
 
+    YARN-1493. Changed ResourceManager and Scheduler interfacing to recognize
+    app-attempts separately from apps. (Jian He via vinodkv)
+
   OPTIMIZATIONS
 
   BUG FIXES
@@ -276,6 +279,12 @@ Release 2.4.0 - UNRELEASED
 
     YARN-1527. Fix yarn rmadmin command to print the correct usage info.
     (Akira AJISAKA via jianhe)
+
+    YARN-1522. Fixed a race condition in the test TestApplicationCleanup that was
+    causing it to randomly fail. (Liyin Liang via vinodkv)
+
+    YARN-1549. Fixed a bug in ResourceManager's ApplicationMasterService that
+    was causing unamanged AMs to not finish correctly. (haosdent via vinodkv)
 
 Release 2.3.0 - UNRELEASED
 

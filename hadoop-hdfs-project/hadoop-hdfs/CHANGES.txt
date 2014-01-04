@@ -243,13 +243,18 @@ Trunk (Unreleased)
 
     HDFS-5636. Enforce a max TTL per cache pool. (awang via cmccabe)
 
+    HDFS-5651. Remove dfs.namenode.caching.enabled and improve CRM locking.
+    (cmccabe via wang)
+
   OPTIMIZATIONS
+
     HDFS-5349. DNA_CACHE and DNA_UNCACHE should be by blockId only. (cmccabe)
 
     HDFS-5665. Remove the unnecessary writeLock while initializing CacheManager
     in FsNameSystem Ctor. (Uma Maheswara Rao G via Andrew Wang)
 
   BUG FIXES
+
     HADOOP-9635 Fix potential Stack Overflow in DomainSocket.c (V. Karthik Kumar
                 via cmccabe)
 
@@ -452,6 +457,19 @@ Trunk (Unreleased)
 
     HDFS-5679. TestCacheDirectives should handle the case where native code
     is not available. (wang)
+
+    HDFS-5701. Fix the CacheAdmin -addPool -maxTtl option name.
+    (Stephen Chu via wang)
+
+    HDFS-5708. The CacheManager throws a NPE in the DataNode logs when
+    processing cache reports that refer to a block not known to the
+    BlockManager. (cmccabe via wang)
+
+    HDFS-5659. dfsadmin -report doesn't output cache information properly.
+    (wang)
+
+    HDFS-5705. TestSecondaryNameNodeUpgrade#testChangeNsIDFails may fail due
+    to ConcurrentModificationException. (Ted Yu via brandonli)
 
   BREAKDOWN OF HDFS-2832 SUBTASKS AND RELATED JIRAS
 
@@ -765,6 +783,9 @@ Release 2.4.0 - UNRELEASED
     HDFS-2933. Improve DataNode Web UI Index Page. (Vivek Ganesan via
     Arpit Agarwal)
 
+    HDFS-5695. Clean up TestOfflineEditsViewer and OfflineEditsViewerHelper.
+    (Haohui Mai via jing9)
+
   OPTIMIZATIONS
 
     HDFS-5239.  Allow FSNamesystem lock fairness to be configurable (daryn)
@@ -1018,6 +1039,11 @@ Release 2.3.0 - UNRELEASED
 
     HDFS-5661. Browsing FileSystem via web ui, should use datanode's fqdn instead of ip 
     address. (Benoy Antony via jing9)
+
+    HDFS-5582. hdfs getconf -excludeFile or -includeFile always failed (sathish
+    via cmccabe)
+
+    HDFS-5671. Fix socket leak in DFSInputStream#getBlockReader. (JamesLi via umamahesh) 
 
 Release 2.2.0 - 2013-10-13
 

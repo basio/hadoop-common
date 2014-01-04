@@ -21,7 +21,6 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CACHEREPORT_INTERVAL_MSEC_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CACHING_ENABLED_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_REFRESH_INTERVAL_MS;
 import static org.apache.hadoop.hdfs.protocol.CachePoolInfo.RELATIVE_EXPIRY_NEVER;
 import static org.apache.hadoop.test.GenericTestUtils.assertExceptionContains;
@@ -65,10 +64,13 @@ import org.apache.hadoop.hdfs.protocol.CacheDirectiveIterator;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveStats;
 import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo.Expiration;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.CachePoolStats;
 import org.apache.hadoop.hdfs.server.blockmanagement.CacheReplicationMonitor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor.CachedBlocksList.Type;
+import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.io.nativeio.NativeIO.POSIX.CacheManipulator;
@@ -104,7 +106,7 @@ public class TestCacheDirectives {
     EditLogFileOutputStream.setShouldSkipFsyncForTesting(false);
   }
 
-  private static final long BLOCK_SIZE = 512;
+  private static final long BLOCK_SIZE = 4096;
   private static final int NUM_DATANODES = 4;
   // Most Linux installs will allow non-root users to lock 64KB.
   // In this test though, we stub out mlock so this doesn't matter.
@@ -115,7 +117,6 @@ public class TestCacheDirectives {
     conf.setLong(DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
     conf.setLong(DFS_DATANODE_MAX_LOCKED_MEMORY_KEY, CACHE_CAPACITY);
     conf.setLong(DFS_HEARTBEAT_INTERVAL_KEY, 1);
-    conf.setBoolean(DFS_NAMENODE_CACHING_ENABLED_KEY, true);
     conf.setLong(DFS_CACHEREPORT_INTERVAL_MSEC_KEY, 1000);
     conf.setLong(DFS_NAMENODE_PATH_BASED_CACHE_REFRESH_INTERVAL_MS, 1000);
     // set low limits here for testing purposes
@@ -796,7 +797,15 @@ public class TestCacheDirectives {
       }
     }, 500, 60000);
 
+    // Send a cache report referring to a bogus block.  It is important that
+    // the NameNode be robust against this.
     NamenodeProtocols nnRpc = namenode.getRpcServer();
+    DataNode dn0 = cluster.getDataNodes().get(0);
+    String bpid = cluster.getNamesystem().getBlockPoolId();
+    LinkedList<Long> bogusBlockIds = new LinkedList<Long> ();
+    bogusBlockIds.add(999999L);
+    nnRpc.cacheReport(dn0.getDNRegistrationForBP(bpid), bpid, bogusBlockIds);
+
     Path rootDir = helper.getDefaultWorkingDirectory(dfs);
     // Create the pool
     final String pool = "friendlyPool";
@@ -826,6 +835,24 @@ public class TestCacheDirectives {
       waitForCachedBlocks(namenode, expected, expected,
           "testWaitForCachedReplicas:1");
     }
+
+    // Check that the datanodes have the right cache values
+    DatanodeInfo[] live = dfs.getDataNodeStats(DatanodeReportType.LIVE);
+    assertEquals("Unexpected number of live nodes", NUM_DATANODES, live.length);
+    long totalUsed = 0;
+    for (DatanodeInfo dn : live) {
+      final long cacheCapacity = dn.getCacheCapacity();
+      final long cacheUsed = dn.getCacheUsed();
+      final long cacheRemaining = dn.getCacheRemaining();
+      assertEquals("Unexpected cache capacity", CACHE_CAPACITY, cacheCapacity);
+      assertEquals("Capacity not equal to used + remaining",
+          cacheCapacity, cacheUsed + cacheRemaining);
+      assertEquals("Remaining not equal to capacity - used",
+          cacheCapacity - cacheUsed, cacheRemaining);
+      totalUsed += cacheUsed;
+    }
+    assertEquals(expected*BLOCK_SIZE, totalUsed);
+
     // Uncache and check each path in sequence
     RemoteIterator<CacheDirectiveEntry> entries =
       new CacheDirectiveIterator(nnRpc, null);
@@ -835,55 +862,6 @@ public class TestCacheDirectives {
       expected -= numBlocksPerFile;
       waitForCachedBlocks(namenode, expected, expected,
           "testWaitForCachedReplicas:2");
-    }
-  }
-
-  @Test(timeout=120000)
-  public void testAddingCacheDirectiveInfosWhenCachingIsDisabled()
-      throws Exception {
-    cluster.shutdown();
-    HdfsConfiguration conf = createCachingConf();
-    conf.setBoolean(DFS_NAMENODE_CACHING_ENABLED_KEY, false);
-    MiniDFSCluster cluster =
-      new MiniDFSCluster.Builder(conf).numDataNodes(NUM_DATANODES).build();
-
-    try {
-      cluster.waitActive();
-      DistributedFileSystem dfs = cluster.getFileSystem();
-      NameNode namenode = cluster.getNameNode();
-      // Create the pool
-      String pool = "pool1";
-      namenode.getRpcServer().addCachePool(new CachePoolInfo(pool));
-      // Create some test files
-      final int numFiles = 2;
-      final int numBlocksPerFile = 2;
-      final List<String> paths = new ArrayList<String>(numFiles);
-      for (int i=0; i<numFiles; i++) {
-        Path p = new Path("/testCachePaths-" + i);
-        FileSystemTestHelper.createFile(dfs, p, numBlocksPerFile,
-            (int)BLOCK_SIZE);
-        paths.add(p.toUri().getPath());
-      }
-      // Check the initial statistics at the namenode
-      waitForCachedBlocks(namenode, 0, 0,
-          "testAddingCacheDirectiveInfosWhenCachingIsDisabled:0");
-      // Cache and check each path in sequence
-      int expected = 0;
-      for (int i=0; i<numFiles; i++) {
-        CacheDirectiveInfo directive =
-            new CacheDirectiveInfo.Builder().
-              setPath(new Path(paths.get(i))).
-              setPool(pool).
-              build();
-        dfs.addCacheDirective(directive);
-        waitForCachedBlocks(namenode, expected, 0,
-          "testAddingCacheDirectiveInfosWhenCachingIsDisabled:1");
-      }
-      Thread.sleep(20000);
-      waitForCachedBlocks(namenode, expected, 0,
-          "testAddingCacheDirectiveInfosWhenCachingIsDisabled:2");
-    } finally {
-      cluster.shutdown();
     }
   }
 
@@ -965,7 +943,6 @@ public class TestCacheDirectives {
         (4+3) * numBlocksPerFile * BLOCK_SIZE,
         3, 2,
         poolInfo, "testWaitForCachedReplicasInDirectory:2:pool");
-
     // remove and watch numCached go to 0
     dfs.removeCacheDirective(id);
     dfs.removeCacheDirective(id2);
