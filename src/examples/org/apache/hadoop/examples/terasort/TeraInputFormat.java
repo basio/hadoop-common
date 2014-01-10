@@ -112,7 +112,7 @@ public class TeraInputFormat extends FileInputFormat<Text,Text> {
     Text key = new Text();
     Text value = new Text();
     int partitions = conf.getNumReduceTasks();
-    long sampleSize = conf.getLong(SAMPLE_SIZE, 100000);
+    long sampleSize = conf.getLong(SAMPLE_SIZE, 100);
     InputSplit[] splits = inFormat.getSplits(conf, conf.getNumMapTasks());
     int samples = Math.min(10, splits.length);
     long recordsPerSample = sampleSize / samples;

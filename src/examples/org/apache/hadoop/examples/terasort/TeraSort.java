@@ -233,6 +233,11 @@ public class TeraSort extends Configured implements Tool {
                                "#" + TeraInputFormat.PARTITION_FILENAME);
     TeraInputFormat.setInputPaths(job, new Path(args[0]));
     FileOutputFormat.setOutputPath(job, new Path(args[1]));
+    int reducers=1;
+    if(args.length==3){
+          reducers=Integer.parseInt(args[2]);
+	} 
+    job.setNumReduceTasks(reducers);
     job.setJobName("TeraSort");
     job.setJarByClass(TeraSort.class);
     job.setOutputKeyClass(Text.class);
@@ -240,6 +245,10 @@ public class TeraSort extends Configured implements Tool {
     job.setInputFormat(TeraInputFormat.class);
     job.setOutputFormat(TeraOutputFormat.class);
     job.setPartitionerClass(TotalOrderPartitioner.class);
+    LOG.info("mapper " + job.getMapperClass().getName());
+    LOG.info("reducer " + job.getReducerClass().getName());
+    LOG.info("reducer# " + job.getNumReduceTasks());
+
     TeraInputFormat.writePartitionFile(job, partitionFile);
     DistributedCache.addCacheFile(partitionUri, job);
     DistributedCache.createSymlink(job);
