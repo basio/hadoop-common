@@ -21,6 +21,9 @@ package org.apache.hadoop.mapreduce.split;
 import java.io.IOException;
 import java.util.Arrays;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -31,6 +34,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.JobSubmissionFiles;
+
 import org.apache.hadoop.mapreduce.MRJobConfig;
 
 /**
@@ -40,7 +44,7 @@ import org.apache.hadoop.mapreduce.MRJobConfig;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class SplitMetaInfoReader {
-  
+	  protected static final Log LOG = LogFactory.getLog(SplitMetaInfoReader.class);  
   public static JobSplit.TaskSplitMetaInfo[] readSplitMetaInfo(
       JobID jobId, FileSystem fs, Configuration conf, Path jobSubmitDir) 
   throws IOException {
@@ -73,6 +77,11 @@ public class SplitMetaInfoReader {
       JobSplit.TaskSplitIndex splitIndex = new JobSplit.TaskSplitIndex(
           jobSplitFile, 
           splitMetaInfo.getStartOffset());
+      String ss="splits "+i + "  "+ jobSplitFile+ " "+ splitMetaInfo.getStartOffset() +":"+ splitMetaInfo.getInputDataLength();
+System.out.println(ss);
+      LOG.info (ss);
+     for (String  s : splitMetaInfo.getLocations())
+    	 LOG.info("loc" +s);
       allSplitMetaInfo[i] = new JobSplit.TaskSplitMetaInfo(splitIndex, 
           splitMetaInfo.getLocations(), 
           splitMetaInfo.getInputDataLength());

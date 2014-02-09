@@ -630,7 +630,7 @@ public class MRAppMaster extends CompositeService {
    */
   protected Job createJob(Configuration conf, JobStateInternal forcedState, 
       String diagnostic) {
-
+LOG.info("Creating Job");
     // create single job
     Job newJob =
         new JobImpl(jobId, appAttemptID, conf, dispatcher.getEventHandler(),
