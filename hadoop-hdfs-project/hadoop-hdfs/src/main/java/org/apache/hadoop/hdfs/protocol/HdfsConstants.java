@@ -17,11 +17,17 @@
  */
 package org.apache.hadoop.hdfs.protocol;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeLayoutVersion;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 
 /************************************
  * Some handy constants
@@ -78,6 +84,24 @@ public class HdfsConstants {
     SAFEMODE_LEAVE, SAFEMODE_ENTER, SAFEMODE_GET;
   }
 
+  public static enum RollingUpgradeAction {
+    QUERY, PREPARE, FINALIZE;
+    
+    private static final Map<String, RollingUpgradeAction> MAP
+        = new HashMap<String, RollingUpgradeAction>();
+    static {
+      MAP.put("", QUERY);
+      for(RollingUpgradeAction a : values()) {
+        MAP.put(a.name(), a);
+      }
+    }
+
+    /** Covert the given String to a RollingUpgradeAction. */
+    public static RollingUpgradeAction fromString(String s) {
+      return MAP.get(s.toUpperCase());
+    }
+  }
+
   // type of the datanode report
   public static enum DatanodeReportType {
     ALL, LIVE, DEAD
@@ -104,11 +128,29 @@ public class HdfsConstants {
 
 
   /**
-   * Please see {@link LayoutVersion} on adding new layout version.
+   * Current layout version for NameNode.
+   * Please see {@link NameNodeLayoutVersion.Feature} on adding new layout version.
    */
-  public static final int LAYOUT_VERSION = LayoutVersion
-      .getCurrentLayoutVersion();
-  
+  public static final int NAMENODE_LAYOUT_VERSION
+      = NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION;
+
+  /**
+   * Current layout version for DataNode.
+   * Please see {@link DataNodeLayoutVersion.Feature} on adding new layout version.
+   */
+  public static final int DATANODE_LAYOUT_VERSION
+      = DataNodeLayoutVersion.CURRENT_LAYOUT_VERSION;
+
+  /**
+   * Path components that are reserved in HDFS.
+   * <p>
+   * .reserved is only reserved under root ("/").
+   */
+  public static final String[] RESERVED_PATH_COMPONENTS = new String[] {
+    HdfsConstants.DOT_SNAPSHOT_DIR,
+    FSDirectory.DOT_RESERVED_STRING
+  };
+
   /**
    * A special path component contained in the path for a snapshot file/dir
    */

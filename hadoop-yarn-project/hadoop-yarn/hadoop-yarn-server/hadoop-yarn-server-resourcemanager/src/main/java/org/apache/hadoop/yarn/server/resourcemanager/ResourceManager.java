@@ -19,6 +19,8 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -29,12 +31,12 @@ import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
-import org.apache.hadoop.http.HttpConfig;
-import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
+import org.apache.hadoop.security.Groups;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.service.Service;
@@ -46,12 +48,15 @@ import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.conf.ConfigurationProvider;
+import org.apache.hadoop.yarn.conf.ConfigurationProviderFactory;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+import org.apache.hadoop.yarn.server.resourcemanager.ahs.RMApplicationHistoryWriter;
 import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.AMLauncherEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.ApplicationMasterLauncher;
 import org.apache.hadoop.yarn.server.resourcemanager.monitor.SchedulingEditPolicy;
@@ -153,7 +158,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
   private boolean recoveryEnabled;
 
   private String webAppAddress;
-
+  private ConfigurationProvider configurationProvider = null;
   /** End of Active services */
 
   private Configuration conf;
@@ -177,9 +182,38 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
-    validateConfigs(conf);
     this.conf = conf;
     this.rmContext = new RMContextImpl();
+
+    this.configurationProvider =
+        ConfigurationProviderFactory.getConfigurationProvider(conf);
+    this.configurationProvider.init(this.conf);
+    rmContext.setConfigurationProvider(configurationProvider);
+
+    // load core-site.xml
+    InputStream coreSiteXMLInputStream =
+        this.configurationProvider.getConfigurationInputStream(this.conf,
+            YarnConfiguration.CORE_SITE_CONFIGURATION_FILE);
+    if (coreSiteXMLInputStream != null) {
+      this.conf.addResource(coreSiteXMLInputStream);
+    }
+
+    // Do refreshUserToGroupsMappings with loaded core-site.xml
+    Groups.getUserToGroupsMappingServiceWithLoadedConfiguration(this.conf)
+        .refresh();
+
+    // Do refreshSuperUserGroupsConfiguration with loaded core-site.xml
+    ProxyUsers.refreshSuperUserGroupsConfiguration(this.conf);
+
+    // load yarn-site.xml
+    InputStream yarnSiteXMLInputStream =
+        this.configurationProvider.getConfigurationInputStream(this.conf,
+            YarnConfiguration.YARN_SITE_CONFIGURATION_FILE);
+    if (yarnSiteXMLInputStream != null) {
+      this.conf.addResource(yarnSiteXMLInputStream);
+    }
+
+    validateConfigs(this.conf);
 
     // register the handlers for all AlwaysOn services using setupDispatcher().
     rmDispatcher = setupDispatcher();
@@ -190,15 +224,15 @@ public class ResourceManager extends CompositeService implements Recoverable {
     addService(adminService);
     rmContext.setRMAdminService(adminService);
 
-    this.rmContext.setHAEnabled(HAUtil.isHAEnabled(conf));
+    this.rmContext.setHAEnabled(HAUtil.isHAEnabled(this.conf));
     if (this.rmContext.isHAEnabled()) {
-      HAUtil.verifyAndSetConfiguration(conf);
+      HAUtil.verifyAndSetConfiguration(this.conf);
     }
     createAndInitActiveServices();
 
-    webAppAddress = WebAppUtils.getRMWebAppURLWithoutScheme(conf);
+    webAppAddress = WebAppUtils.getRMWebAppURLWithoutScheme(this.conf);
 
-    super.serviceInit(conf);
+    super.serviceInit(this.conf);
   }
   
   protected QueueACLsManager createQueueACLsManager(ResourceScheduler scheduler,
@@ -259,6 +293,10 @@ public class ResourceManager extends CompositeService implements Recoverable {
   protected RMAppManager createRMAppManager() {
     return new RMAppManager(this.rmContext, this.scheduler, this.masterService,
       this.applicationACLsManager, this.conf);
+  }
+
+  protected RMApplicationHistoryWriter createRMApplicationHistoryWriter() {
+    return new RMApplicationHistoryWriter();
   }
 
   // sanity check for configurations
@@ -344,6 +382,11 @@ public class ResourceManager extends CompositeService implements Recoverable {
         delegationTokenRenewer = createDelegationTokenRenewer();
         rmContext.setDelegationTokenRenewer(delegationTokenRenewer);
       }
+
+      RMApplicationHistoryWriter rmApplicationHistoryWriter =
+          createRMApplicationHistoryWriter();
+      addService(rmApplicationHistoryWriter);
+      rmContext.setRMApplicationHistoryWriter(rmApplicationHistoryWriter);
 
       // Register event handler for NodesListManager
       nodesListManager = new NodesListManager(rmContext);
@@ -607,7 +650,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
     @Override
     public void handle(RMFatalEvent event) {
       LOG.fatal("Received a " + RMFatalEvent.class.getName() + " of type " +
-          event.getType().name());
+          event.getType().name() + ". Cause:\n" + event.getCause());
 
       if (event.getType() == RMFatalEventType.STATE_STORE_FENCED) {
         LOG.info("RMStateStore has been fenced");
@@ -862,8 +905,9 @@ public class ResourceManager extends CompositeService implements Recoverable {
   }
   
   protected void doSecureLogin() throws IOException {
+	InetSocketAddress socAddr = getBindAddress(conf);
     SecurityUtil.login(this.conf, YarnConfiguration.RM_KEYTAB,
-        YarnConfiguration.RM_PRINCIPAL);
+        YarnConfiguration.RM_PRINCIPAL, socAddr.getHostName());
   }
 
   @Override
@@ -873,6 +917,9 @@ public class ResourceManager extends CompositeService implements Recoverable {
     }
     if (fetcher != null) {
       fetcher.stop();
+    }
+    if (configurationProvider != null) {
+      configurationProvider.close();
     }
     super.serviceStop();
     transitionToStandby(false);
@@ -980,19 +1027,12 @@ public class ResourceManager extends CompositeService implements Recoverable {
       ShutdownHookManager.get().addShutdownHook(
         new CompositeServiceShutdownHook(resourceManager),
         SHUTDOWN_HOOK_PRIORITY);
-      setHttpPolicy(conf);
       resourceManager.init(conf);
       resourceManager.start();
     } catch (Throwable t) {
       LOG.fatal("Error starting ResourceManager", t);
       System.exit(-1);
     }
-  }
-  
-  private static void setHttpPolicy(Configuration conf) {
-    HttpConfig.setPolicy(Policy.fromString(conf.get(
-      YarnConfiguration.YARN_HTTP_POLICY_KEY,
-      YarnConfiguration.YARN_HTTP_POLICY_DEFAULT)));
   }
 
   /**
@@ -1013,5 +1053,18 @@ public class ResourceManager extends CompositeService implements Recoverable {
     rmDispatcher = dispatcher;
     addIfService(rmDispatcher);
     rmContext.setDispatcher(rmDispatcher);
+  }
+
+
+  /**
+   * Retrieve RM bind address from configuration
+   *
+   * @param conf
+   * @return InetSocketAddress
+   */
+public static InetSocketAddress getBindAddress(Configuration conf) {
+    return conf.getSocketAddr(YarnConfiguration.RM_ADDRESS,
+      YarnConfiguration.DEFAULT_RM_ADDRESS,
+      YarnConfiguration.DEFAULT_RM_PORT);
   }
 }

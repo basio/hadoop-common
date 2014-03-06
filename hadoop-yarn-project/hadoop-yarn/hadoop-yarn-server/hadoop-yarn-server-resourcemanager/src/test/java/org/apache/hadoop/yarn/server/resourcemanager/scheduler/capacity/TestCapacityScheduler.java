@@ -40,6 +40,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.yarn.LocalConfigurationProvider;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -104,6 +105,7 @@ public class TestCapacityScheduler {
   private static float B3_CAPACITY = 20;
 
   private ResourceManager resourceManager = null;
+  private RMContext mockContext;
   
   @Before
   public void setUp() throws Exception {
@@ -118,6 +120,9 @@ public class TestCapacityScheduler {
     resourceManager.getRMContainerTokenSecretManager().rollMasterKey();
     resourceManager.getRMNMTokenSecretManager().rollMasterKey();
     ((AsyncDispatcher)resourceManager.getRMContext().getDispatcher()).start();
+    mockContext = mock(RMContext.class);
+    when(mockContext.getConfigurationProvider()).thenReturn(
+        new LocalConfigurationProvider());
   }
 
   @After
@@ -133,7 +138,7 @@ public class TestCapacityScheduler {
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB, 2048);
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_MB, 1024);
     try {
-      scheduler.reinitialize(conf, null);
+      scheduler.reinitialize(conf, mockContext);
       fail("Exception is expected because the min memory allocation is" +
         " larger than the max memory allocation.");
     } catch (YarnRuntimeException e) {
@@ -147,7 +152,7 @@ public class TestCapacityScheduler {
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_VCORES, 2);
     conf.setInt(YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES, 1);
     try {
-      scheduler.reinitialize(conf, null);
+      scheduler.reinitialize(conf, mockContext);
       fail("Exception is expected because the min vcores allocation is" +
         " larger than the max vcores allocation.");
     } catch (YarnRuntimeException e) {
@@ -348,12 +353,12 @@ public class TestCapacityScheduler {
     cs.reinitialize(conf, new RMContextImpl(null, null, null, null, null,
       null, new RMContainerTokenSecretManager(conf),
       new NMTokenSecretManagerInRM(conf),
-      new ClientToAMTokenSecretManagerInRM()));
+      new ClientToAMTokenSecretManagerInRM(), null));
     checkQueueCapacities(cs, A_CAPACITY, B_CAPACITY);
 
     conf.setCapacity(A, 80f);
     conf.setCapacity(B, 20f);
-    cs.reinitialize(conf,null);
+    cs.reinitialize(conf, mockContext);
     checkQueueCapacities(cs, 80f, 20f);
   }
 
@@ -447,7 +452,7 @@ public class TestCapacityScheduler {
     cs.reinitialize(conf, new RMContextImpl(null, null, null, null, null,
       null, new RMContainerTokenSecretManager(conf),
       new NMTokenSecretManagerInRM(conf),
-      new ClientToAMTokenSecretManagerInRM()));
+      new ClientToAMTokenSecretManagerInRM(), null));
   }
 
   @Test
@@ -460,7 +465,7 @@ public class TestCapacityScheduler {
     cs.reinitialize(csConf, new RMContextImpl(null, null, null, null,
       null, null, new RMContainerTokenSecretManager(csConf),
       new NMTokenSecretManagerInRM(csConf),
-      new ClientToAMTokenSecretManagerInRM()));
+      new ClientToAMTokenSecretManagerInRM(), null));
 
     RMNode n1 = MockNodes.newNodeInfo(0, MockNodes.newResource(4 * GB), 1);
     RMNode n2 = MockNodes.newNodeInfo(0, MockNodes.newResource(2 * GB), 2);
@@ -487,7 +492,7 @@ public class TestCapacityScheduler {
     cs.reinitialize(conf, new RMContextImpl(null, null, null, null, null,
       null, new RMContainerTokenSecretManager(conf),
       new NMTokenSecretManagerInRM(conf),
-      new ClientToAMTokenSecretManagerInRM()));
+      new ClientToAMTokenSecretManagerInRM(), null));
     checkQueueCapacities(cs, A_CAPACITY, B_CAPACITY);
 
     // Add a new queue b4
@@ -503,7 +508,7 @@ public class TestCapacityScheduler {
       conf.setCapacity(B2, B2_CAPACITY);
       conf.setCapacity(B3, B3_CAPACITY);
       conf.setCapacity(B4, B4_CAPACITY);
-      cs.reinitialize(conf,null);
+      cs.reinitialize(conf,mockContext);
       checkQueueCapacities(cs, 80f, 20f);
       
       // Verify parent for B4
@@ -638,7 +643,7 @@ public class TestCapacityScheduler {
     cs.reinitialize(conf, new RMContextImpl(rmDispatcher, null, null, null,
       null, null, new RMContainerTokenSecretManager(conf),
       new NMTokenSecretManagerInRM(conf),
-      new ClientToAMTokenSecretManagerInRM()));
+      new ClientToAMTokenSecretManagerInRM(), null));
 
     SchedulerApplication app =
         TestSchedulerUtils.verifyAppAddedAndRemovedFromScheduler(

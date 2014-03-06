@@ -59,6 +59,7 @@ import org.apache.hadoop.mapreduce.jobhistory.JobHistoryEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryParser.TaskInfo;
 import org.apache.hadoop.mapreduce.jobhistory.JobInfoChangeEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobInitedEvent;
+import org.apache.hadoop.mapreduce.jobhistory.JobQueueChangeEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobSubmittedEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobUnsuccessfulCompletionEvent;
 import org.apache.hadoop.mapreduce.lib.chain.ChainMapper;
@@ -148,6 +149,9 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
 
   // Maximum no. of fetch-failure notifications after which map task is failed
   private static final int MAX_FETCH_FAILURES_NOTIFICATIONS = 3;
+
+  public static final String JOB_KILLED_DIAG =
+      "Job received Kill while in RUNNING state.";
   
   //final fields
   private final ApplicationAttemptId applicationAttemptId;
@@ -181,7 +185,7 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
   private final EventHandler eventHandler;
   private final MRAppMetrics metrics;
   private final String userName;
-  private final String queueName;
+  private String queueName;
   private final long appSubmitTime;
   private final AppContext appContext;
 
@@ -1123,6 +1127,13 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
     return queueName;
   }
   
+  @Override
+  public void setQueueName(String queueName) {
+    this.queueName = queueName;
+    JobQueueChangeEvent jqce = new JobQueueChangeEvent(oldJobId, queueName);
+    eventHandler.handle(new JobHistoryEvent(jobId, jqce));
+  }
+  
   /*
    * (non-Javadoc)
    * @see org.apache.hadoop.mapreduce.v2.app.job.Job#getConfFile()
@@ -1609,7 +1620,8 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
               finishTime,
               succeededMapTaskCount,
               succeededReduceTaskCount,
-              finalState.toString());
+              finalState.toString(),
+              diagnostics);
       eventHandler.handle(new JobHistoryEvent(jobId,
           unsuccessfulJobEvent));
       finished(finalState);
@@ -1722,7 +1734,7 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
       JobUnsuccessfulCompletionEvent failedEvent =
           new JobUnsuccessfulCompletionEvent(job.oldJobId,
               job.finishTime, 0, 0,
-              JobStateInternal.KILLED.toString());
+              JobStateInternal.KILLED.toString(), job.diagnostics);
       job.eventHandler.handle(new JobHistoryEvent(job.jobId, failedEvent));
       job.finished(JobStateInternal.KILLED);
     }
@@ -1755,7 +1767,7 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
       implements SingleArcTransition<JobImpl, JobEvent> {
     @Override
     public void transition(JobImpl job, JobEvent event) {
-      job.addDiagnostic("Job received Kill while in RUNNING state.");
+      job.addDiagnostic(JOB_KILLED_DIAG);
       for (Task task : job.tasks.values()) {
         job.eventHandler.handle(
             new TaskEvent(task.getID(), TaskEventType.T_KILL));
@@ -2119,7 +2131,7 @@ public class JobImpl implements org.apache.hadoop.mapreduce.v2.app.job.Job,
       JobUnsuccessfulCompletionEvent failedEvent =
           new JobUnsuccessfulCompletionEvent(job.oldJobId,
               job.finishTime, 0, 0,
-              jobHistoryString);
+              jobHistoryString, job.diagnostics);
       job.eventHandler.handle(new JobHistoryEvent(job.jobId, failedEvent));
       job.finished(terminationState);
     }

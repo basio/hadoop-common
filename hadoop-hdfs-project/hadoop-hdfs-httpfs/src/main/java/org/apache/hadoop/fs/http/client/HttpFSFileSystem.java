@@ -243,7 +243,7 @@ public class HttpFSFileSystem extends FileSystem
     if (makeQualified) {
       path = makeQualified(path);
     }
-    final URL url = HttpFSUtils.createHttpURL(path, params);
+    final URL url = HttpFSUtils.createURL(path, params);
     return doAsRealUserIfNecessary(new Callable<HttpURLConnection>() {
       @Override
       public HttpURLConnection call() throws Exception {
@@ -329,8 +329,7 @@ public class HttpFSFileSystem extends FileSystem
    */
   @Override
   protected int getDefaultPort() {
-    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_KEY,
-        DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT);
+    return DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT;
   }
 
   /**

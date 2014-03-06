@@ -121,12 +121,17 @@ import org.apache.hadoop.oncrpc.security.SysSecurityHandler;
 import org.apache.hadoop.oncrpc.security.Verifier;
 import org.apache.hadoop.oncrpc.security.VerifierNone;
 import org.apache.hadoop.security.AccessControlException;
+import org.apache.hadoop.security.SecurityUtil;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
 import org.jboss.netty.channel.ChannelHandlerContext;
 
 import com.google.common.annotations.VisibleForTesting;
+
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NFS_KEYTAB_FILE_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NFS_USER_NAME_KEY;
 
 /**
  * RPC program corresponding to nfs daemon. See {@link Nfs3}.
@@ -187,6 +192,10 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
         Nfs3Constant.FILE_DUMP_DIR_DEFAULT);
     boolean enableDump = config.getBoolean(Nfs3Constant.ENABLE_FILE_DUMP_KEY,
         Nfs3Constant.ENABLE_FILE_DUMP_DEFAULT);
+    UserGroupInformation.setConfiguration(config);
+    SecurityUtil.login(config, DFS_NFS_KEYTAB_FILE_KEY,
+            DFS_NFS_USER_NAME_KEY);
+
     if (!enableDump) {
       writeDumpDir = null;
     } else {
@@ -479,9 +488,9 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
     } 
 
     try {
-      // Use superUserClient to get file attr since we don't know whether the
-      // NFS client user has access permission to the file
-      attrs = writeManager.getFileAttr(superUserClient, handle, iug);
+      // HDFS-5804 removed supserUserClient access
+      attrs = writeManager.getFileAttr(dfsClient, handle, iug);
+
       if (attrs == null) {
         LOG.error("Can't get path for fileId:" + handle.getFileId());
         return new ACCESS3Response(Nfs3Status.NFS3ERR_STALE);
@@ -545,7 +554,8 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
         return new READLINK3Response(Nfs3Status.NFS3ERR_SERVERFAULT);
       }
       if (MAX_READ_TRANSFER_SIZE < target.getBytes().length) {
-        return new READLINK3Response(Nfs3Status.NFS3ERR_IO, postOpAttr, null);
+        return new READLINK3Response(Nfs3Status.NFS3ERR_IO, postOpAttr,
+            new byte[0]);
       }
 
       return new READLINK3Response(Nfs3Status.NFS3_OK, postOpAttr,
@@ -603,8 +613,10 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
       // Only do access check.
       try {
         // Don't read from cache. Client may not have read permission.
-        attrs = Nfs3Utils.getFileAttr(superUserClient,
-            Nfs3Utils.getFileIdPath(handle), iug);
+        attrs = Nfs3Utils.getFileAttr(
+                  dfsClient,
+                  Nfs3Utils.getFileIdPath(handle),
+                  iug);
       } catch (IOException e) {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Get error accessing file, fileId:" + handle.getFileId());
@@ -1826,7 +1838,8 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
       } catch (IOException e1) {
         LOG.info("Can't get postOpAttr for fileId: " + handle.getFileId());
       }
-      WccData fileWcc = new WccData(Nfs3Utils.getWccAttr(preOpAttr), postOpAttr);
+      WccData fileWcc = new WccData(preOpAttr == null ? null
+          : Nfs3Utils.getWccAttr(preOpAttr), postOpAttr);
       return new COMMIT3Response(Nfs3Status.NFS3ERR_IO, fileWcc,
           Nfs3Constant.WRITE_COMMIT_VERF);
     }

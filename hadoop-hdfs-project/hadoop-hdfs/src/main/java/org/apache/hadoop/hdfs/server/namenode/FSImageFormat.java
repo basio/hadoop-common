@@ -32,12 +32,13 @@ import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 import org.apache.commons.logging.Log;
-import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -45,13 +46,15 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathIsNotDirectoryException;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.LayoutFlags;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
-import org.apache.hadoop.hdfs.protocol.LayoutFlags;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.InconsistentFSStateException;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeature;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.FileDiffList;
@@ -65,8 +68,13 @@ import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress.Co
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.Step;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StepType;
 import org.apache.hadoop.hdfs.util.ReadOnlyList;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.util.StringUtils;
+
+import com.google.common.base.Preconditions;
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Contains inner classes for reading or writing the on-disk format for
@@ -173,16 +181,74 @@ import org.apache.hadoop.io.Text;
 @InterfaceStability.Evolving
 public class FSImageFormat {
   private static final Log LOG = FSImage.LOG;
-  
+
   // Static-only class
   private FSImageFormat() {}
-  
+
+  interface AbstractLoader {
+    MD5Hash getLoadedImageMd5();
+    long getLoadedImageTxId();
+  }
+
+  static class LoaderDelegator implements AbstractLoader {
+    private AbstractLoader impl;
+    private final Configuration conf;
+    private final FSNamesystem fsn;
+
+    LoaderDelegator(Configuration conf, FSNamesystem fsn) {
+      this.conf = conf;
+      this.fsn = fsn;
+    }
+
+    @Override
+    public MD5Hash getLoadedImageMd5() {
+      return impl.getLoadedImageMd5();
+    }
+
+    @Override
+    public long getLoadedImageTxId() {
+      return impl.getLoadedImageTxId();
+    }
+
+    public void load(File file) throws IOException {
+      Preconditions.checkState(impl == null, "Image already loaded!");
+
+      FileInputStream is = null;
+      try {
+        is = new FileInputStream(file);
+        byte[] magic = new byte[FSImageUtil.MAGIC_HEADER.length];
+        IOUtils.readFully(is, magic, 0, magic.length);
+        if (Arrays.equals(magic, FSImageUtil.MAGIC_HEADER)) {
+          FSImageFormatProtobuf.Loader loader = new FSImageFormatProtobuf.Loader(
+              conf, fsn);
+          impl = loader;
+          loader.load(file);
+        } else {
+          Loader loader = new Loader(conf, fsn);
+          impl = loader;
+          loader.load(file);
+        }
+
+      } finally {
+        IOUtils.cleanup(LOG, is);
+      }
+    }
+  }
+
+  /**
+   * Construct a loader class to load the image. It chooses the loader based on
+   * the layout version.
+   */
+  public static LoaderDelegator newLoader(Configuration conf, FSNamesystem fsn) {
+    return new LoaderDelegator(conf, fsn);
+  }
+
   /**
    * A one-shot class responsible for loading an image. The load() function
    * should be called once, after which the getter methods may be used to retrieve
    * information about the image that was loaded, if loading was successful.
    */
-  public static class Loader {
+  public static class Loader implements AbstractLoader {
     private final Configuration conf;
     /** which namesystem this loader is working for */
     private final FSNamesystem namesystem;
@@ -207,12 +273,14 @@ public class FSImageFormat {
      * Return the MD5 checksum of the image that has been loaded.
      * @throws IllegalStateException if load() has not yet been called.
      */
-    MD5Hash getLoadedImageMd5() {
+    @Override
+    public MD5Hash getLoadedImageMd5() {
       checkLoaded();
       return imgDigest;
     }
 
-    long getLoadedImageTxId() {
+    @Override
+    public long getLoadedImageTxId() {
       checkLoaded();
       return imgTxId;
     }
@@ -235,7 +303,7 @@ public class FSImageFormat {
       }
     }
 
-    void load(File curFile) throws IOException {
+    public void load(File curFile) throws IOException {
       checkNotLoaded();
       assert curFile != null : "curFile is null";
 
@@ -260,9 +328,10 @@ public class FSImageFormat {
               "imgVersion " + imgVersion +
               " expected to be " + getLayoutVersion());
         }
-        boolean supportSnapshot = LayoutVersion.supports(Feature.SNAPSHOT,
-            imgVersion);
-        if (LayoutVersion.supports(Feature.ADD_LAYOUT_FLAGS, imgVersion)) {
+        boolean supportSnapshot = NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.SNAPSHOT, imgVersion);
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.ADD_LAYOUT_FLAGS, imgVersion)) {
           LayoutFlags.read(in);
         }
 
@@ -275,7 +344,8 @@ public class FSImageFormat {
         long genstamp = in.readLong();
         namesystem.setGenerationStampV1(genstamp);
         
-        if (LayoutVersion.supports(Feature.SEQUENTIAL_BLOCK_ID, imgVersion)) {
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.SEQUENTIAL_BLOCK_ID, imgVersion)) {
           // read the starting generation stamp for sequential block IDs
           genstamp = in.readLong();
           namesystem.setGenerationStampV2(genstamp);
@@ -297,14 +367,16 @@ public class FSImageFormat {
 
         // read the transaction ID of the last edit represented by
         // this image
-        if (LayoutVersion.supports(Feature.STORED_TXIDS, imgVersion)) {
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.STORED_TXIDS, imgVersion)) {
           imgTxId = in.readLong();
         } else {
           imgTxId = 0;
         }
 
         // read the last allocated inode id in the fsimage
-        if (LayoutVersion.supports(Feature.ADD_INODE_ID, imgVersion)) {
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.ADD_INODE_ID, imgVersion)) {
           long lastInodeId = in.readLong();
           namesystem.resetLastInodeId(lastInodeId);
           if (LOG.isDebugEnabled()) {
@@ -323,7 +395,8 @@ public class FSImageFormat {
 
         // read compression related info
         FSImageCompression compression;
-        if (LayoutVersion.supports(Feature.FSIMAGE_COMPRESSION, imgVersion)) {
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.FSIMAGE_COMPRESSION, imgVersion)) {
           compression = FSImageCompression.readCompressionHeader(conf, in);
         } else {
           compression = FSImageCompression.createNoopCompression();
@@ -336,8 +409,8 @@ public class FSImageFormat {
         LOG.info("Number of files = " + numFiles);
         prog.setTotal(Phase.LOADING_FSIMAGE, step, numFiles);
         Counter counter = prog.getCounter(Phase.LOADING_FSIMAGE, step);
-        if (LayoutVersion.supports(Feature.FSIMAGE_NAME_OPTIMIZATION,
-            imgVersion)) {
+        if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.FSIMAGE_NAME_OPTIMIZATION, imgVersion)) {
           if (supportSnapshot) {
             loadLocalNameINodesWithSnapshot(numFiles, in, counter);
           } else {
@@ -394,9 +467,10 @@ public class FSImageFormat {
      */
     private void loadLocalNameINodesWithSnapshot(long numFiles, DataInput in,
         Counter counter) throws IOException {
-      assert LayoutVersion.supports(Feature.FSIMAGE_NAME_OPTIMIZATION,
-          getLayoutVersion());
-      assert LayoutVersion.supports(Feature.SNAPSHOT, getLayoutVersion());
+      assert NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.FSIMAGE_NAME_OPTIMIZATION, getLayoutVersion());
+      assert NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.SNAPSHOT, getLayoutVersion());
       
       // load root
       loadRoot(in, counter);
@@ -405,7 +479,8 @@ public class FSImageFormat {
     }
     
   /** 
-   * load fsimage files assuming only local names are stored
+   * load fsimage files assuming only local names are stored. Used when
+   * snapshots are not supported by the layout version.
    *   
    * @param numFiles number of files expected to be read
    * @param in image input stream
@@ -414,8 +489,8 @@ public class FSImageFormat {
    */  
    private void loadLocalNameINodes(long numFiles, DataInput in, Counter counter)
        throws IOException {
-     assert LayoutVersion.supports(Feature.FSIMAGE_NAME_OPTIMIZATION,
-         getLayoutVersion());
+     assert NameNodeLayoutVersion.supports(
+         LayoutVersion.Feature.FSIMAGE_NAME_OPTIMIZATION, getLayoutVersion());
      assert numFiles > 0;
 
      // load root
@@ -521,6 +596,8 @@ public class FSImageFormat {
     */
    private int loadDirectory(DataInput in, Counter counter) throws IOException {
      String parentPath = FSImageSerialization.readString(in);
+     // Rename .snapshot paths if we're doing an upgrade
+     parentPath = renameReservedPathsOnUpgrade(parentPath, getLayoutVersion());
      final INodeDirectory parent = INodeDirectory.valueOf(
          namesystem.dir.rootDir.getNode(parentPath, true), parentPath);
      return loadChildren(parent, in, counter);
@@ -580,11 +657,9 @@ public class FSImageFormat {
    */
   private void addToParent(INodeDirectory parent, INode child) {
     FSDirectory fsDir = namesystem.dir;
-    if (parent == fsDir.rootDir && FSDirectory.isReservedName(child)) {
-        throw new HadoopIllegalArgumentException("File name \""
-            + child.getLocalName() + "\" is reserved. Please "
-            + " change the name of the existing file or directory to another "
-            + "name before upgrading to this release.");
+    if (parent == fsDir.rootDir) {
+        child.setLocalName(renameReservedRootComponentOnUpgrade(
+            child.getLocalNameBytes(), getLayoutVersion()));
     }
     // NOTE: This does not update space counts for parents
     if (!parent.addChild(child)) {
@@ -621,10 +696,11 @@ public class FSImageFormat {
     public INode loadINodeWithLocalName(boolean isSnapshotINode,
         DataInput in, boolean updateINodeMap, Counter counter)
         throws IOException {
-      final byte[] localName = FSImageSerialization.readLocalName(in);
+      byte[] localName = FSImageSerialization.readLocalName(in);
+      localName =
+          renameReservedComponentOnUpgrade(localName, getLayoutVersion());
       INode inode = loadINode(localName, isSnapshotINode, in, counter);
-      if (updateINodeMap
-          && LayoutVersion.supports(Feature.ADD_INODE_ID, getLayoutVersion())) {
+      if (updateINodeMap) {
         namesystem.dir.addToInodeMap(inode);
       }
       return inode;
@@ -640,18 +716,21 @@ public class FSImageFormat {
   INode loadINode(final byte[] localName, boolean isSnapshotINode,
       DataInput in, Counter counter) throws IOException {
     final int imgVersion = getLayoutVersion();
-    if (LayoutVersion.supports(Feature.SNAPSHOT, imgVersion)) {
+    if (NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.SNAPSHOT, imgVersion)) {
       namesystem.getFSDirectory().verifyINodeName(localName);
     }
 
-    long inodeId = LayoutVersion.supports(Feature.ADD_INODE_ID, imgVersion) ? 
-           in.readLong() : namesystem.allocateNewInodeId();
+    long inodeId = NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.ADD_INODE_ID, imgVersion) ? in.readLong()
+        : namesystem.allocateNewInodeId();
     
     final short replication = namesystem.getBlockManager().adjustReplication(
         in.readShort());
     final long modificationTime = in.readLong();
     long atime = 0;
-    if (LayoutVersion.supports(Feature.FILE_ACCESS_TIME, imgVersion)) {
+    if (NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.FILE_ACCESS_TIME, imgVersion)) {
       atime = in.readLong();
     }
     final long blockSize = in.readLong();
@@ -671,7 +750,8 @@ public class FSImageFormat {
       String clientMachine = "";
       boolean underConstruction = false;
       FileDiffList fileDiffs = null;
-      if (LayoutVersion.supports(Feature.SNAPSHOT, imgVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.SNAPSHOT, imgVersion)) {
         // read diffs
         fileDiffs = SnapshotFSImageFormat.loadFileDiffList(in, this);
 
@@ -700,24 +780,24 @@ public class FSImageFormat {
           modificationTime, atime, blocks, replication, blockSize);
       if (underConstruction) {
         file.toUnderConstruction(clientName, clientMachine, null);
-          return fileDiffs == null ? file : new INodeFile(file, fileDiffs);
-      } else {
-          return fileDiffs == null ? file : new INodeFile(file, fileDiffs);
       }
-    } else if (numBlocks == -1) {
-      //directory
+        return fileDiffs == null ? file : new INodeFile(file, fileDiffs);
+      } else if (numBlocks == -1) {
+        //directory
       
       //read quotas
       final long nsQuota = in.readLong();
       long dsQuota = -1L;
-      if (LayoutVersion.supports(Feature.DISKSPACE_QUOTA, imgVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.DISKSPACE_QUOTA, imgVersion)) {
         dsQuota = in.readLong();
       }
 
       //read snapshot info
       boolean snapshottable = false;
       boolean withSnapshot = false;
-      if (LayoutVersion.supports(Feature.SNAPSHOT, imgVersion)) {
+      if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.SNAPSHOT, imgVersion)) {
         snapshottable = in.readBoolean();
         if (!snapshottable) {
           withSnapshot = in.readBoolean();
@@ -780,7 +860,8 @@ public class FSImageFormat {
         throws IOException {
       final int layoutVersion = getLayoutVersion();
       
-      if (!LayoutVersion.supports(Feature.OPTIMIZE_SNAPSHOT_INODES, layoutVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.OPTIMIZE_SNAPSHOT_INODES, layoutVersion)) {
         return loadINodeWithLocalName(true, in, false).asFile();
       }
   
@@ -792,8 +873,8 @@ public class FSImageFormat {
       final short replication = namesystem.getBlockManager().adjustReplication(
           in.readShort());
       final long preferredBlockSize = in.readLong();
-      
-      return new INodeFileAttributes.SnapshotCopy(name, permissions, modificationTime,
+
+      return new INodeFileAttributes.SnapshotCopy(name, permissions, null, modificationTime,
           accessTime, replication, preferredBlockSize);
     }
 
@@ -801,7 +882,8 @@ public class FSImageFormat {
         throws IOException {
       final int layoutVersion = getLayoutVersion();
       
-      if (!LayoutVersion.supports(Feature.OPTIMIZE_SNAPSHOT_INODES, layoutVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.OPTIMIZE_SNAPSHOT_INODES, layoutVersion)) {
         return loadINodeWithLocalName(true, in, false).asDirectory();
       }
   
@@ -814,9 +896,9 @@ public class FSImageFormat {
       final long dsQuota = in.readLong();
   
       return nsQuota == -1L && dsQuota == -1L?
-          new INodeDirectoryAttributes.SnapshotCopy(name, permissions, modificationTime)
+          new INodeDirectoryAttributes.SnapshotCopy(name, permissions, null, modificationTime)
         : new INodeDirectoryAttributes.CopyWithQuota(name, permissions,
-            modificationTime, nsQuota, dsQuota);
+            null, modificationTime, nsQuota, dsQuota);
     }
   
     private void loadFilesUnderConstruction(DataInput in,
@@ -836,7 +918,8 @@ public class FSImageFormat {
         INodeFile oldnode = null;
         boolean inSnapshot = false;
         if (path != null && FSDirectory.isReservedName(path) && 
-            LayoutVersion.supports(Feature.ADD_INODE_ID, getLayoutVersion())) {
+            NameNodeLayoutVersion.supports(
+                LayoutVersion.Feature.ADD_INODE_ID, getLayoutVersion())) {
           // TODO: for HDFS-5428, we use reserved path for those INodeFileUC in 
           // snapshot. If we support INode ID in the layout version, we can use
           // the inode id to find the oldnode.
@@ -869,7 +952,8 @@ public class FSImageFormat {
         throws IOException {
       int imgVersion = getLayoutVersion();
 
-      if (!LayoutVersion.supports(Feature.DELEGATION_TOKEN, imgVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.DELEGATION_TOKEN, imgVersion)) {
         //SecretManagerState is not available.
         //This must not happen if security is turned on.
         return; 
@@ -879,7 +963,8 @@ public class FSImageFormat {
 
     private void loadCacheManagerState(DataInput in) throws IOException {
       int imgVersion = getLayoutVersion();
-      if (!LayoutVersion.supports(Feature.CACHING, imgVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.CACHING, imgVersion)) {
         return;
       }
       namesystem.getCacheManager().loadStateCompat(in);
@@ -926,7 +1011,156 @@ public class FSImageFormat {
       return snapshotMap.get(in.readInt());
     }
   }
-  
+
+  @VisibleForTesting
+  public static TreeMap<String, String> renameReservedMap =
+      new TreeMap<String, String>();
+
+  /**
+   * Use the default key-value pairs that will be used to determine how to
+   * rename reserved paths on upgrade.
+   */
+  @VisibleForTesting
+  public static void useDefaultRenameReservedPairs() {
+    renameReservedMap.clear();
+    for (String key: HdfsConstants.RESERVED_PATH_COMPONENTS) {
+      renameReservedMap.put(
+          key,
+          key + "." + HdfsConstants.NAMENODE_LAYOUT_VERSION + "."
+              + "UPGRADE_RENAMED");
+    }
+  }
+
+  /**
+   * Set the key-value pairs that will be used to determine how to rename
+   * reserved paths on upgrade.
+   */
+  @VisibleForTesting
+  public static void setRenameReservedPairs(String renameReserved) {
+    // Clear and set the default values
+    useDefaultRenameReservedPairs();
+    // Overwrite with provided values
+    setRenameReservedMapInternal(renameReserved);
+  }
+
+  private static void setRenameReservedMapInternal(String renameReserved) {
+    Collection<String> pairs =
+        StringUtils.getTrimmedStringCollection(renameReserved);
+    for (String p : pairs) {
+      String[] pair = StringUtils.split(p, '/', '=');
+      Preconditions.checkArgument(pair.length == 2,
+          "Could not parse key-value pair " + p);
+      String key = pair[0];
+      String value = pair[1];
+      Preconditions.checkArgument(DFSUtil.isReservedPathComponent(key),
+          "Unknown reserved path " + key);
+      Preconditions.checkArgument(DFSUtil.isValidNameForComponent(value),
+          "Invalid rename path for " + key + ": " + value);
+      LOG.info("Will rename reserved path " + key + " to " + value);
+      renameReservedMap.put(key, value);
+    }
+  }
+
+  /**
+   * When upgrading from an old version, the filesystem could contain paths
+   * that are now reserved in the new version (e.g. .snapshot). This renames
+   * these new reserved paths to a user-specified value to avoid collisions
+   * with the reserved name.
+   * 
+   * @param path Old path potentially containing a reserved path
+   * @return New path with reserved path components renamed to user value
+   */
+  static String renameReservedPathsOnUpgrade(String path,
+      final int layoutVersion) {
+    final String oldPath = path;
+    // If any known LVs aren't supported, we're doing an upgrade
+    if (!NameNodeLayoutVersion.supports(Feature.ADD_INODE_ID, layoutVersion)) {
+      String[] components = INode.getPathNames(path);
+      // Only need to worry about the root directory
+      if (components.length > 1) {
+        components[1] = DFSUtil.bytes2String(
+            renameReservedRootComponentOnUpgrade(
+                DFSUtil.string2Bytes(components[1]),
+                layoutVersion));
+        path = DFSUtil.strings2PathString(components);
+      }
+    }
+    if (!NameNodeLayoutVersion.supports(Feature.SNAPSHOT, layoutVersion)) {
+      String[] components = INode.getPathNames(path);
+      // Special case the root path
+      if (components.length == 0) {
+        return path;
+      }
+      for (int i=0; i<components.length; i++) {
+        components[i] = DFSUtil.bytes2String(
+            renameReservedComponentOnUpgrade(
+                DFSUtil.string2Bytes(components[i]),
+                layoutVersion));
+      }
+      path = DFSUtil.strings2PathString(components);
+    }
+
+    if (!path.equals(oldPath)) {
+      LOG.info("Upgrade process renamed reserved path " + oldPath + " to "
+          + path);
+    }
+    return path;
+  }
+
+  private final static String RESERVED_ERROR_MSG = 
+      FSDirectory.DOT_RESERVED_PATH_PREFIX + " is a reserved path and "
+      + HdfsConstants.DOT_SNAPSHOT_DIR + " is a reserved path component in"
+      + " this version of HDFS. Please rollback and delete or rename"
+      + " this path, or upgrade with the "
+      + StartupOption.RENAMERESERVED.getName()
+      + " [key-value pairs]"
+      + " option to automatically rename these paths during upgrade.";
+
+  /**
+   * Same as {@link #renameReservedPathsOnUpgrade(String)}, but for a single
+   * byte array path component.
+   */
+  private static byte[] renameReservedComponentOnUpgrade(byte[] component,
+      final int layoutVersion) {
+    // If the LV doesn't support snapshots, we're doing an upgrade
+    if (!NameNodeLayoutVersion.supports(Feature.SNAPSHOT, layoutVersion)) {
+      if (Arrays.equals(component, HdfsConstants.DOT_SNAPSHOT_DIR_BYTES)) {
+        Preconditions.checkArgument(
+            renameReservedMap != null &&
+            renameReservedMap.containsKey(HdfsConstants.DOT_SNAPSHOT_DIR),
+            RESERVED_ERROR_MSG);
+        component =
+            DFSUtil.string2Bytes(renameReservedMap
+                .get(HdfsConstants.DOT_SNAPSHOT_DIR));
+      }
+    }
+    return component;
+  }
+
+  /**
+   * Same as {@link #renameReservedPathsOnUpgrade(String)}, but for a single
+   * byte array path component.
+   */
+  private static byte[] renameReservedRootComponentOnUpgrade(byte[] component,
+      final int layoutVersion) {
+    // If the LV doesn't support inode IDs, we're doing an upgrade
+    if (!NameNodeLayoutVersion.supports(Feature.ADD_INODE_ID, layoutVersion)) {
+      if (Arrays.equals(component, FSDirectory.DOT_RESERVED)) {
+        Preconditions.checkArgument(
+            renameReservedMap != null &&
+            renameReservedMap.containsKey(FSDirectory.DOT_RESERVED_STRING),
+            RESERVED_ERROR_MSG);
+        final String renameString = renameReservedMap
+            .get(FSDirectory.DOT_RESERVED_STRING);
+        component =
+            DFSUtil.string2Bytes(renameString);
+        LOG.info("Renamed root path " + FSDirectory.DOT_RESERVED_STRING
+            + " to " + renameString);
+      }
+    }
+    return component;
+  }
+
   /**
    * A one-shot class responsible for writing an image file.
    * The write() function should be called once, after which the getter
@@ -993,7 +1227,7 @@ public class FSImageFormat {
       DigestOutputStream fos = new DigestOutputStream(fout, digester);
       DataOutputStream out = new DataOutputStream(fos);
       try {
-        out.writeInt(HdfsConstants.LAYOUT_VERSION);
+        out.writeInt(HdfsConstants.NAMENODE_LAYOUT_VERSION);
         LayoutFlags.write(out);
         // We use the non-locked version of getNamespaceInfo here since
         // the coordinating thread of saveNamespace already has read-locked

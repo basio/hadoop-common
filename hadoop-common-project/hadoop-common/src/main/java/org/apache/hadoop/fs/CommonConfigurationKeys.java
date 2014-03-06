@@ -82,6 +82,14 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /** Default value for IPC_SERVER_HANDLER_QUEUE_SIZE_KEY */
   public static final int     IPC_SERVER_HANDLER_QUEUE_SIZE_DEFAULT = 100;
 
+  /**
+   * CallQueue related settings. These are not used directly, but rather
+   * combined with a namespace and port. For instance:
+   * IPC_CALLQUEUE_NAMESPACE + ".8020." + IPC_CALLQUEUE_IMPL_KEY
+   */
+  public static final String IPC_CALLQUEUE_NAMESPACE = "ipc";
+  public static final String IPC_CALLQUEUE_IMPL_KEY = "callqueue.impl";
+
   /** Internal buffer size for Lzo compressor/decompressors */
   public static final String  IO_COMPRESSION_CODEC_LZO_BUFFERSIZE_KEY =
     "io.compression.codec.lzo.buffersize";
@@ -245,6 +253,7 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
 
   public static final String RPC_METRICS_QUANTILE_ENABLE =
       "rpc.metrics.quantile.enable";
+  public static final boolean RPC_METRICS_QUANTILE_ENABLE_DEFAULT = false;
   public static final String  RPC_METRICS_PERCENTILES_INTERVALS_KEY =
       "rpc.metrics.percentiles.intervals";
 }

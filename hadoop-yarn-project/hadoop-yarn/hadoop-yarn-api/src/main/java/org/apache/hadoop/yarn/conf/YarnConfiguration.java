@@ -23,11 +23,11 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.util.StringUtils;
@@ -37,12 +37,39 @@ import org.apache.hadoop.yarn.api.ApplicationConstants;
 @Evolving
 public class YarnConfiguration extends Configuration {
 
-  private static final String YARN_DEFAULT_XML_FILE = "yarn-default.xml";
-  private static final String YARN_SITE_XML_FILE = "yarn-site.xml";
+  @Private
+  public static final String CS_CONFIGURATION_FILE= "capacity-scheduler.xml";
+
+  @Private
+  public static final String HADOOP_POLICY_CONFIGURATION_FILE =
+      "hadoop-policy.xml";
+
+  @Private
+  public static final String YARN_SITE_CONFIGURATION_FILE = "yarn-site.xml";
+
+  private static final String YARN_DEFAULT_CONFIGURATION_FILE =
+      "yarn-default.xml";
+
+  @Private
+  public static final String CORE_SITE_CONFIGURATION_FILE = "core-site.xml";
+
+  @Private
+  public static final List<String> RM_CONFIGURATION_FILES =
+      Collections.unmodifiableList(Arrays.asList(
+          CS_CONFIGURATION_FILE,
+          HADOOP_POLICY_CONFIGURATION_FILE,
+          YARN_SITE_CONFIGURATION_FILE,
+          CORE_SITE_CONFIGURATION_FILE));
+
+  @Evolving
+  public static final int APPLICATION_MAX_TAGS = 10;
+
+  @Evolving
+  public static final int APPLICATION_MAX_TAG_LENGTH = 100;
 
   static {
-    Configuration.addDefaultResource(YARN_DEFAULT_XML_FILE);
-    Configuration.addDefaultResource(YARN_SITE_XML_FILE);
+    Configuration.addDefaultResource(YARN_DEFAULT_CONFIGURATION_FILE);
+    Configuration.addDefaultResource(YARN_SITE_CONFIGURATION_FILE);
   }
 
   //Configurations
@@ -88,6 +115,8 @@ public class YarnConfiguration extends Configuration {
   public static final String RM_PREFIX = "yarn.resourcemanager.";
 
   public static final String RM_CLUSTER_ID = RM_PREFIX + "cluster-id";
+
+  public static final String RM_HOSTNAME = RM_PREFIX + "hostname";
 
   /** The address of the applications manager interface in the RM.*/
   public static final String RM_ADDRESS = 
@@ -165,6 +194,8 @@ public class YarnConfiguration extends Configuration {
   /** The https address of the RM web application.*/
   public static final String RM_WEBAPP_HTTPS_ADDRESS =
       RM_PREFIX + "webapp.https.address";
+  public static final boolean YARN_SSL_CLIENT_HTTPS_NEED_AUTH_DEFAULT = false;
+  public static final String YARN_SSL_SERVER_RESOURCE_DEFAULT = "ssl-server.xml";
   
   public static final int DEFAULT_RM_WEBAPP_HTTPS_PORT = 8090;
   public static final String DEFAULT_RM_WEBAPP_HTTPS_ADDRESS = "0.0.0.0:"
@@ -263,6 +294,12 @@ public class YarnConfiguration extends Configuration {
       RM_PREFIX + "nodemanagers.heartbeat-interval-ms";
   public static final long DEFAULT_RM_NM_HEARTBEAT_INTERVAL_MS = 1000;
 
+  /** Number of worker threads that write the history data. */
+  public static final String RM_HISTORY_WRITER_MULTI_THREADED_DISPATCHER_POOL_SIZE =
+      RM_PREFIX + "history-writer.multi-threaded-dispatcher.pool-size";
+  public static final int DEFAULT_RM_HISTORY_WRITER_MULTI_THREADED_DISPATCHER_POOL_SIZE =
+      10;
+
   //Delegation token related keys
   public static final String  DELEGATION_KEY_UPDATE_INTERVAL_KEY = 
     RM_PREFIX + "delegation.key.update-interval";
@@ -298,6 +335,8 @@ public class YarnConfiguration extends Configuration {
   public static final String RM_ZK_ACL = RM_ZK_PREFIX + "acl";
   public static final String DEFAULT_RM_ZK_ACL = "world:anyone:rwcda";
 
+  public static final String RM_ZK_AUTH = RM_ZK_PREFIX + "auth";
+
   public static final String ZK_STATE_STORE_PREFIX =
       RM_PREFIX + "zk-state-store.";
 
@@ -318,26 +357,42 @@ public class YarnConfiguration extends Configuration {
   public static final String RM_HA_IDS = RM_HA_PREFIX + "rm-ids";
   public static final String RM_HA_ID = RM_HA_PREFIX + "id";
 
-  @Private
-  public static final List<String> RM_SERVICES_ADDRESS_CONF_KEYS =
+  /** Store the related configuration files in File System */
+  public static final String FS_BASED_RM_CONF_STORE = RM_PREFIX
+      + "configuration.file-system-based-store";
+  public static final String DEFAULT_FS_BASED_RM_CONF_STORE = "/yarn/conf";
+
+  public static final String RM_CONFIGURATION_PROVIDER_CLASS = RM_PREFIX
+      + "configuration.provider-class";
+  public static final String DEFAULT_RM_CONFIGURATION_PROVIDER_CLASS =
+      "org.apache.hadoop.yarn.LocalConfigurationProvider";
+
+  private static final List<String> RM_SERVICES_ADDRESS_CONF_KEYS_HTTP =
       Collections.unmodifiableList(Arrays.asList(
           RM_ADDRESS,
           RM_SCHEDULER_ADDRESS,
           RM_ADMIN_ADDRESS,
           RM_RESOURCE_TRACKER_ADDRESS,
-          HttpConfig.isSecure() ? RM_WEBAPP_HTTPS_ADDRESS
-              : RM_WEBAPP_ADDRESS));
+          RM_WEBAPP_ADDRESS));
+
+  private static final List<String> RM_SERVICES_ADDRESS_CONF_KEYS_HTTPS =
+      Collections.unmodifiableList(Arrays.asList(
+          RM_ADDRESS,
+          RM_SCHEDULER_ADDRESS,
+          RM_ADMIN_ADDRESS,
+          RM_RESOURCE_TRACKER_ADDRESS,
+          RM_WEBAPP_HTTPS_ADDRESS));
 
   public static final String AUTO_FAILOVER_PREFIX =
       RM_HA_PREFIX + "automatic-failover.";
 
   public static final String AUTO_FAILOVER_ENABLED =
       AUTO_FAILOVER_PREFIX + "enabled";
-  public static final boolean DEFAULT_AUTO_FAILOVER_ENABLED = false;
+  public static final boolean DEFAULT_AUTO_FAILOVER_ENABLED = true;
 
   public static final String AUTO_FAILOVER_EMBEDDED =
       AUTO_FAILOVER_PREFIX + "embedded";
-  public static final boolean DEFAULT_AUTO_FAILOVER_EMBEDDED = false;
+  public static final boolean DEFAULT_AUTO_FAILOVER_EMBEDDED = true;
 
   public static final String AUTO_FAILOVER_ZK_BASE_PATH =
       AUTO_FAILOVER_PREFIX + "zk-base-path";
@@ -586,6 +641,7 @@ public class YarnConfiguration extends Configuration {
    */
   public static final String NM_LOG_RETAIN_SECONDS = NM_PREFIX
       + "log.retain-seconds";
+  public static final long DEFAULT_NM_LOG_RETAIN_SECONDS = 3 * 60 * 60;
 
   /**
    * Number of threads used in log cleanup. Only applicable if Log aggregation
@@ -682,7 +738,7 @@ public class YarnConfiguration extends Configuration {
   public static final String NM_MIN_HEALTHY_DISKS_FRACTION =
     NM_PREFIX + "disk-health-checker.min-healthy-disks";
   /**
-   * By default, at least 5% of disks are to be healthy to say that the node
+   * By default, at least 25% of disks are to be healthy to say that the node
    * is healthy in terms of disks.
    */
   public static final float DEFAULT_NM_MIN_HEALTHY_DISKS_FRACTION
@@ -811,6 +867,9 @@ public class YarnConfiguration extends Configuration {
   /** The address for the web proxy.*/
   public static final String PROXY_ADDRESS =
     PROXY_PREFIX + "address";
+  public static final int DEFAULT_PROXY_PORT = 9099;
+  public static final String DEFAULT_PROXY_ADDRESS =
+    "0.0.0.0:" + DEFAULT_RM_PORT;
   
   /**
    * YARN Service Level Authorization
@@ -932,6 +991,106 @@ public class YarnConfiguration extends Configuration {
       YARN_PREFIX + "app.container.log.backups";
 
   ////////////////////////////////
+  // Timeline Service Configs
+  ////////////////////////////////
+
+  public static final String TIMELINE_SERVICE_PREFIX =
+      YARN_PREFIX + "timeline-service.";
+
+
+  // mark app-history related configs @Private as application history is going
+  // to be integrated into the timeline service
+  @Private
+  public static final String APPLICATION_HISTORY_PREFIX =
+      TIMELINE_SERVICE_PREFIX + "generic-application-history.";
+
+  /**
+   *  The setting that controls whether application history service is
+   *  enabled or not.
+   */
+  @Private
+  public static final String APPLICATION_HISTORY_ENABLED =
+      APPLICATION_HISTORY_PREFIX + "enabled";
+  @Private
+  public static final boolean DEFAULT_APPLICATION_HISTORY_ENABLED = false;
+
+  /** Application history store class */
+  @Private
+  public static final String APPLICATION_HISTORY_STORE =
+      APPLICATION_HISTORY_PREFIX + "store-class";
+
+  /** URI for FileSystemApplicationHistoryStore */
+  @Private
+  public static final String FS_APPLICATION_HISTORY_STORE_URI =
+      APPLICATION_HISTORY_PREFIX + "fs-history-store.uri";
+
+  /** T-file compression types used to compress history data.*/
+  @Private
+  public static final String FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE =
+      APPLICATION_HISTORY_PREFIX + "fs-history-store.compression-type";
+  @Private
+  public static final String DEFAULT_FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE =
+      "none";
+
+  /** host:port address for timeline service RPC APIs. */
+  public static final String TIMELINE_SERVICE_ADDRESS =
+      TIMELINE_SERVICE_PREFIX + "address";
+  public static final int DEFAULT_TIMELINE_SERVICE_PORT = 10200;
+  public static final String DEFAULT_TIMELINE_SERVICE_ADDRESS = "0.0.0.0:"
+      + DEFAULT_TIMELINE_SERVICE_PORT;
+
+  /** The number of threads to handle client RPC API requests. */
+  public static final String TIMELINE_SERVICE_HANDLER_THREAD_COUNT =
+      TIMELINE_SERVICE_PREFIX + "handler-thread-count";
+  public static final int DEFAULT_TIMELINE_SERVICE_CLIENT_THREAD_COUNT = 10;
+  
+
+  /** The address of the timeline service web application.*/
+  public static final String TIMELINE_SERVICE_WEBAPP_ADDRESS =
+      TIMELINE_SERVICE_PREFIX  + "webapp.address";
+
+  public static final int DEFAULT_TIMELINE_SERVICE_WEBAPP_PORT = 8188;
+  public static final String DEFAULT_TIMELINE_SERVICE_WEBAPP_ADDRESS =
+      "0.0.0.0:" + DEFAULT_TIMELINE_SERVICE_WEBAPP_PORT;
+
+  /** The https address of the timeline service web application.*/
+  public static final String TIMELINE_SERVICE_WEBAPP_HTTPS_ADDRESS =
+      TIMELINE_SERVICE_PREFIX + "webapp.https.address";
+
+  public static final int DEFAULT_TIMELINE_SERVICE_WEBAPP_HTTPS_PORT = 8190;
+  public static final String DEFAULT_TIMELINE_SERVICE_WEBAPP_HTTPS_ADDRESS =
+      "0.0.0.0:" + DEFAULT_TIMELINE_SERVICE_WEBAPP_HTTPS_PORT;
+
+  /**The kerberos principal to be used for spnego filter for timeline service.*/
+  public static final String TIMELINE_SERVICE_WEBAPP_SPNEGO_USER_NAME_KEY =
+      TIMELINE_SERVICE_PREFIX + "webapp.spnego-principal";
+
+  /**The kerberos keytab to be used for spnego filter for timeline service.*/
+  public static final String TIMELINE_SERVICE_WEBAPP_SPNEGO_KEYTAB_FILE_KEY =
+      TIMELINE_SERVICE_PREFIX + "webapp.spnego-keytab-file";
+
+  /** Timeline service store class */
+  public static final String TIMELINE_SERVICE_STORE =
+      TIMELINE_SERVICE_PREFIX + "store-class";
+
+  public static final String TIMELINE_SERVICE_LEVELDB_PREFIX =
+      TIMELINE_SERVICE_PREFIX + "leveldb-timeline-store.";
+
+  /** Timeline service leveldb path */
+  public static final String TIMELINE_SERVICE_LEVELDB_PATH =
+      TIMELINE_SERVICE_LEVELDB_PREFIX + "path";
+
+  /** Timeline service leveldb start time read cache (number of entities) */
+  public static final String
+      TIMELINE_SERVICE_LEVELDB_START_TIME_READ_CACHE_SIZE =
+      TIMELINE_SERVICE_LEVELDB_PREFIX + "start-time-read-cache-size";
+
+  /** Timeline service leveldb start time write cache (number of entities) */
+  public static final String
+      TIMELINE_SERVICE_LEVELDB_START_TIME_WRITE_CACHE_SIZE =
+      TIMELINE_SERVICE_LEVELDB_PREFIX + "start-time-write-cache-size";
+
+  ////////////////////////////////
   // Other Configs
   ////////////////////////////////
 
@@ -952,6 +1111,17 @@ public class YarnConfiguration extends Configuration {
       YARN_PREFIX + "client.application-client-protocol.poll-interval-ms";
   public static final long DEFAULT_YARN_CLIENT_APPLICATION_CLIENT_PROTOCOL_POLL_INTERVAL_MS =
       200;
+
+  /**
+   * The duration that the yarn client library waits, cumulatively across polls,
+   * for an expected state change to occur. Defaults to -1, which indicates no
+   * limit.
+   */
+  public static final String YARN_CLIENT_APPLICATION_CLIENT_PROTOCOL_POLL_TIMEOUT_MS =
+      YARN_PREFIX + "client.application-client-protocol.poll-timeout-ms";
+  public static final long DEFAULT_YARN_CLIENT_APPLICATION_CLIENT_PROTOCOL_POLL_TIMEOUT_MS =
+      -1;
+
   /**
    * Max number of threads in NMClientAsync to process container management
    * events
@@ -977,10 +1147,9 @@ public class YarnConfiguration extends Configuration {
       YARN_PREFIX + "client.max-nodemanagers-proxies";
   public static final int DEFAULT_NM_CLIENT_MAX_NM_PROXIES = 500;
 
-  public static final String YARN_HTTP_POLICY_KEY =
-          YARN_PREFIX + "http.policy";
-  public static final String YARN_HTTP_POLICY_DEFAULT =
-          CommonConfigurationKeysPublic.HTTP_POLICY_HTTP_ONLY;
+  public static final String YARN_HTTP_POLICY_KEY = YARN_PREFIX + "http.policy";
+  public static final String YARN_HTTP_POLICY_DEFAULT = HttpConfig.Policy.HTTP_ONLY
+      .name();
 
   public YarnConfiguration() {
     super();
@@ -993,9 +1162,17 @@ public class YarnConfiguration extends Configuration {
     }
   }
 
+  @Private
+  public static List<String> getServiceAddressConfKeys(Configuration conf) {
+    return useHttps(conf) ? RM_SERVICES_ADDRESS_CONF_KEYS_HTTPS
+        : RM_SERVICES_ADDRESS_CONF_KEYS_HTTP;
+  }
+
   /**
    * Get the socket address for <code>name</code> property as a
-   * <code>InetSocketAddress</code>.
+   * <code>InetSocketAddress</code>. On a HA cluster,
+   * this fetches the address corresponding to the RM identified by
+   * {@link #RM_HA_ID}.
    * @param name property name.
    * @param defaultAddress the default value
    * @param defaultPort the default port
@@ -1005,7 +1182,7 @@ public class YarnConfiguration extends Configuration {
   public InetSocketAddress getSocketAddr(
       String name, String defaultAddress, int defaultPort) {
     String address;
-    if (HAUtil.isHAEnabled(this) && RM_SERVICES_ADDRESS_CONF_KEYS.contains(name)) {
+    if (HAUtil.isHAEnabled(this) && getServiceAddressConfKeys(this).contains(name)) {
       address = HAUtil.getConfValueForRMInstance(name, defaultAddress, this);
     } else {
       address = get(name, defaultAddress);
@@ -1021,5 +1198,45 @@ public class YarnConfiguration extends Configuration {
       prefix = HAUtil.addSuffix(prefix, HAUtil.getRMHAId(this));
     }
     return super.updateConnectAddr(prefix, addr);
+  }
+
+  @Private
+  public static int getRMDefaultPortNumber(String addressPrefix,
+      Configuration conf) {
+    if (addressPrefix.equals(YarnConfiguration.RM_ADDRESS)) {
+      return YarnConfiguration.DEFAULT_RM_PORT;
+    } else if (addressPrefix.equals(YarnConfiguration.RM_SCHEDULER_ADDRESS)) {
+      return YarnConfiguration.DEFAULT_RM_SCHEDULER_PORT;
+    } else if (addressPrefix.equals(YarnConfiguration.RM_WEBAPP_ADDRESS)) {
+      return YarnConfiguration.DEFAULT_RM_WEBAPP_PORT;
+    } else if (addressPrefix.equals(YarnConfiguration.RM_WEBAPP_HTTPS_ADDRESS)) {
+      return YarnConfiguration.DEFAULT_RM_WEBAPP_HTTPS_PORT;
+    } else if (addressPrefix
+        .equals(YarnConfiguration.RM_RESOURCE_TRACKER_ADDRESS)) {
+      return YarnConfiguration.DEFAULT_RM_RESOURCE_TRACKER_PORT;
+    } else if (addressPrefix.equals(YarnConfiguration.RM_ADMIN_ADDRESS)) {
+      return YarnConfiguration.DEFAULT_RM_ADMIN_PORT;
+    } else {
+      throw new HadoopIllegalArgumentException(
+          "Invalid RM RPC address Prefix: " + addressPrefix
+              + ". The valid value should be one of "
+              + getServiceAddressConfKeys(conf));
+    }
+  }
+
+  public static boolean useHttps(Configuration conf) {
+    return HttpConfig.Policy.HTTPS_ONLY == HttpConfig.Policy.fromString(conf
+        .get(YARN_HTTP_POLICY_KEY,
+            YARN_HTTP_POLICY_DEFAULT));
+  }
+
+  @Private
+  public static String getClusterId(Configuration conf) {
+    String clusterId = conf.get(YarnConfiguration.RM_CLUSTER_ID);
+    if (clusterId == null) {
+      throw new HadoopIllegalArgumentException("Configuration doesn't specify" +
+          YarnConfiguration.RM_CLUSTER_ID);
+    }
+    return clusterId;
   }
 }

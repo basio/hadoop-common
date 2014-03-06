@@ -130,7 +130,7 @@
   <property>
     <description>Are acls enabled.</description>
     <name>yarn.acl.enable</name>
-    <value>true</value>
+    <value>false</value>
   </property>
 
   <property>
@@ -357,7 +357,7 @@
 
       By default, when this property is not set, we use the ACLs from
       yarn.resourcemanager.zk-acl for shared admin access and
-      rm-address:cluster-timestamp for username-based exclusive create-delete
+      rm-address:random-number for username-based exclusive create-delete
       access.
 
       This property allows users to set ACLs of their choice instead of using
@@ -395,7 +395,9 @@
       the Active mode when prompted to.
       (2) The nodes in the RM ensemble are listed in
       yarn.resourcemanager.ha.rm-ids
-      (3) The id of each RM comes from yarn.resourcemanager.ha.id
+      (3) The id of each RM either comes from yarn.resourcemanager.ha.id
+      if yarn.resourcemanager.ha.id is explicitly specified or can be
+      figured out by matching yarn.resourcemanager.address.{id} with local address
       (4) The actual physical addresses come from the configs of the pattern
       - {rpc-config}.{id}</description>
     <name>yarn.resourcemanager.ha.enabled</name>
@@ -403,17 +405,20 @@
   </property>
 
   <property>
-    <description>Enable automatic failover.</description>
+    <description>Enable automatic failover.
+      By default, it is enabled only when HA is enabled</description>
     <name>yarn.resourcemanager.ha.automatic-failover.enabled</name>
-    <value>false</value>
+    <value>true</value>
   </property>
 
   <property>
-    <description>Enable embedded automatic failover. The embedded elector
-      relies on the RM state store to handle fencing, and is primarily intended
-      to be used in conjunction with ZKRMStateStore.</description>
+    <description>Enable embedded automatic failover.
+      By default, it is enabled only when HA is enabled.
+      The embedded elector relies on the RM state store to handle fencing,
+      and is primarily intended to be used in conjunction with ZKRMStateStore.
+    </description>
     <name>yarn.resourcemanager.ha.automatic-failover.embedded</name>
-    <value>false</value>
+    <value>true</value>
   </property>
 
   <property>
@@ -442,7 +447,10 @@
 
   <property>
     <description>The id (string) of the current RM. When HA is enabled, this
-      is a required config. See description of yarn.resourcemanager.ha.enabled
+      is an optional config. The id of current RM can be set by explicitly
+      specifying yarn.resourcemanager.ha.id or figured out by matching
+      yarn.resourcemanager.address.{id} with local address
+      See description of yarn.resourcemanager.ha.enabled
       for full details on how this is used.</description>
     <name>yarn.resourcemanager.ha.id</name>
     <!--value>rm1</value-->
@@ -562,6 +570,24 @@
         scheduler, other policies, or a configuration of either.</description>
     <name>yarn.resourcemanager.scheduler.monitor.policies</name>
     <value>org.apache.hadoop.yarn.server.resourcemanager.monitor.capacity.ProportionalCapacityPreemptionPolicy</value>
+  </property>
+
+  <property>
+    <description>Number of worker threads that write the history data.</description>
+    <name>yarn.resourcemanager.history-writer.multi-threaded-dispatcher.pool-size</name>
+    <value>10</value>
+  </property>
+
+  <property>
+    <description>The class to use as the configuration provider.
+    If org.apache.hadoop.yarn.LocalConfigurationProvider is used,
+    the local configuration will be loaded.
+    If org.apache.hadoop.yarn.FileSystemBasedConfigurationProvider is used,
+    the configuration which will be loaded should be uploaded to remote File system first.
+    </description>>
+    <name>yarn.resourcemanager.configuration.provider-class</name>
+    <value>org.apache.hadoop.yarn.LocalConfigurationProvider</value>
+    <!-- <value>org.apache.hadoop.yarn.FileSystemBasedConfigurationProvider</value> -->
   </property>
 
   <!-- Node Manager Configs -->
@@ -1039,6 +1065,83 @@
     </description>
     <name>yarn.application.classpath</name>
     <value></value>
+  </property>
+
+  <!-- Timeline Service's Configuration-->
+
+  <property>
+    <description>The hostname of the timeline service web application.</description>
+    <name>yarn.timeline-service.hostname</name>
+    <value>0.0.0.0</value>
+  </property>
+
+  <property>
+    <description>This is default address for the timeline server to start the
+    RPC server.</description>
+    <name>yarn.timeline-service.address</name>
+    <value>0.0.0.0:10200</value>
+  </property>
+
+  <property>
+    <description>The http address of the timeline service web application.</description>
+    <name>yarn.timeline-service.webapp.address</name>
+    <value>${yarn.timeline-service.hostname}:8188</value>
+  </property>
+
+  <property>
+    <description>The https adddress of the timeline service web application.</description>
+    <name>yarn.timeline-service.webapp.https.address</name>
+    <value>${yarn.timeline-service.hostname}:8190</value>
+  </property>
+
+  <property>
+    <description>Store class name for timeline store</description>
+    <name>yarn.timeline-service.store-class</name>
+    <value>org.apache.hadoop.yarn.server.applicationhistoryservice.timeline.LeveldbTimelineStore</value>
+  </property>
+
+  <property>
+    <description>Store file name for leveldb timeline store</description>
+    <name>yarn.timeline-service.leveldb-timeline-store.path</name>
+    <value>${yarn.log.dir}/timeline</value>
+  </property>
+
+  <property>
+    <description>Handler thread count to serve the client RPC requests.</description>
+    <name>yarn.timeline-service.handler-thread-count</name>
+    <value>10</value>
+  </property>
+
+  <property>
+    <description>Indicate to ResourceManager as well as clients whether
+    history-service is enabled or not. If enabled, ResourceManager starts
+    recording historical data that ApplicationHistory service can consume.
+    Similarly, clients can redirect to the history service when applications
+    finish if this is enabled.</description>
+    <name>yarn.timeline-service.generic-application-history.enabled</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <description>URI pointing to the location of the FileSystem path where
+    the history will be persisted. This must be supplied when using
+    org.apache.hadoop.yarn.server.applicationhistoryservice.FileSystemApplicationHistoryStore
+    as the value for yarn.timeline-service.generic-application-history.store-class</description>
+    <name>yarn.timeline-service.generic-application-history.fs-history-store.uri</name>
+    <value>${hadoop.log.dir}/yarn/system/history</value>
+  </property>
+
+  <property>
+    <description>T-file compression types used to compress history data.</description>
+    <name>yarn.timeline-service.generic-application-history.fs-history-store.compression-type</name>
+    <value>none</value>
+  </property>
+  
+  <property>
+	<description>Store class name for history store, defaulting to file
+	system store </description>
+	<name>yarn.timeline-service.generic-application-history.store-class</name>
+	<value>org.apache.hadoop.yarn.server.applicationhistoryservice.FileSystemApplicationHistoryStore</value>
   </property>
 
   <!-- Other configuration -->

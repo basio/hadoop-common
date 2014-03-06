@@ -35,8 +35,8 @@
       }
 
       if (sticky) {
-	var exec = ((parms.perm % 10) & 1) == 1;
-	res[res.length - 1] = exec ? 't' : 'T';
+        var otherExec = ((ctx.current().permission % 10) & 1) == 1;
+        res = res.substr(0, res.length - 1) + (otherExec ? 't' : 'T');
       }
 
       chunk.write(dir + res);
@@ -52,12 +52,37 @@
     $('#alert-panel').show();
   }
 
+  $(window).bind('hashchange', function () {
+    $('#alert-panel').hide();
+
+    var dir = window.location.hash.slice(1);
+    if(dir == "") {
+      dir = "/";
+    }
+    if(current_directory != dir) {
+      browse_directory(dir);
+    }
+  });
+
   function network_error_handler(url) {
     return function (jqxhr, text, err) {
-      var msg = '<p>Failed to retreive data from ' + url + ', cause: ' + err + '</p>';
-      if (url.indexOf('/webhdfs/v1') === 0)  {
-        msg += '<p>WebHDFS might be disabled. WebHDFS is required to browse the filesystem.</p>';
-      }
+      switch(jqxhr.status) {
+        case 401:
+          var msg = '<p>Authentication failed when trying to open ' + url + ': Unauthrozied.</p>';
+          break;
+        case 403:
+          if(jqxhr.responseJSON !== undefined && jqxhr.responseJSON.RemoteException !== undefined) {
+            var msg = '<p>' + jqxhr.responseJSON.RemoteException.message + "</p>";
+            break;
+          }
+          var msg = '<p>Permission denied when trying to open ' + url + ': ' + err + '</p>';
+          break;
+        case 404:
+          var msg = '<p>Path does not exist on HDFS or WebHDFS is disabled.  Please check your path or enable WebHDFS</p>';
+          break;
+        default:
+          var msg = '<p>Failed to retreive data from ' + url + ': ' + err + '</p>';
+        }
       show_err_msg(msg);
     };
   }
@@ -112,7 +137,7 @@
       $('#file-info-tail').hide();
       $('#file-info-title').text("File information - " + path);
 
-      var download_url = '/webhdfs/v1' + abs_path + '/?op=OPEN';
+      var download_url = '/webhdfs/v1' + abs_path + '?op=OPEN';
 
       $('#file-info-download').attr('href', download_url);
       $('#file-info-preview').click(function() {
@@ -145,6 +170,7 @@
 
       current_directory = dir;
       $('#directory').val(dir);
+      window.location.hash = dir;
       dust.render('explorer', base.push(d), function(err, out) {
         $('#panel').html(out);
 
@@ -169,7 +195,12 @@
 
     var b = function() { browse_directory($('#directory').val()); };
     $('#btn-nav-directory').click(b);
-    browse_directory('/');
+    var dir = window.location.hash.slice(1);
+    if(dir == "") {
+      window.location.hash = "/";
+    } else {
+      browse_directory(dir);
+    }
   }
 
   init();

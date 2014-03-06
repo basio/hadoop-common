@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
    Licensed to the Apache Software Foundation (ASF) under one or more
    contributor license agreements.  See the NOTICE file distributed with
@@ -15,7 +16,6 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 -->
-<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 
 <!-- Do not modify this file directly.  Instead, copy entries that you -->
 <!-- wish to modify from this file into mapred-site.xml and change them -->
@@ -511,6 +511,14 @@
 </property>
 
 <property>
+  <name>yarn.app.mapreduce.am.container.log.limit.kb</name>
+  <value>0</value>
+  <description>The maximum size of the MRAppMaster attempt container logs in KB.
+    0 disables the cap.
+  </description>
+</property>
+
+<property>
   <name>yarn.app.mapreduce.task.container.log.backups</name>
   <value>0</value>
   <description>Number of backup files for task logs when using
@@ -726,6 +734,14 @@
     the queue, and access is allowed for submitting jobs to the queue.
   </description>
 </property>
+
+  <property>
+    <name>mapreduce.job.tags</name>
+    <value></value>
+    <description> Tags for the job that will be passed to YARN at submission 
+      time. Queries to YARN for applications can filter on these tags.
+    </description>
+  </property>
 
 <property>
   <name>mapreduce.cluster.local.dir</name>

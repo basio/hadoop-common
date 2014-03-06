@@ -37,8 +37,9 @@ import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecret
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
 import org.apache.hadoop.yarn.api.protocolrecords.CancelDelegationTokenRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.RenewDelegationTokenRequest;
+import org.apache.hadoop.yarn.client.ClientRMProxy;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
-import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.util.Records;
 
 /**
@@ -138,21 +139,23 @@ public class RMDelegationTokenIdentifier extends AbstractDelegationTokenIdentifi
     }
     
     private static ApplicationClientProtocol getRmClient(Token<?> token,
-        Configuration conf) {
-      InetSocketAddress addr = SecurityUtil.getTokenServiceAddr(token);
-      if (localSecretManager != null) {
-        // return null if it's our token
-        if (localServiceAddress.getAddress().isAnyLocalAddress()) {
+        Configuration conf) throws IOException {
+      String[] services = token.getService().toString().split(",");
+      for (String service : services) {
+        InetSocketAddress addr = NetUtils.createSocketAddr(service);
+        if (localSecretManager != null) {
+          // return null if it's our token
+          if (localServiceAddress.getAddress().isAnyLocalAddress()) {
             if (NetUtils.isLocalAddress(addr.getAddress()) &&
                 addr.getPort() == localServiceAddress.getPort()) {
               return null;
             }
-        } else if (addr.equals(localServiceAddress)) {
-          return null;
+          } else if (addr.equals(localServiceAddress)) {
+            return null;
+          }
         }
       }
-      final YarnRPC rpc = YarnRPC.create(conf);
-      return (ApplicationClientProtocol)rpc.getProxy(ApplicationClientProtocol.class, addr, conf);        
+      return ClientRMProxy.createRMProxy(conf, ApplicationClientProtocol.class);
     }
 
     // get renewer so we can always renew our own tokens

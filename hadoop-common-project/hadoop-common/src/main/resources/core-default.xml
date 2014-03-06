@@ -256,7 +256,7 @@
 <property>
   <name>hadoop.rpc.protection</name>
   <value>authentication</value>
-  <description>This field sets the quality of protection for secured sasl 
+  <description>A comma-separated list of protection values for secured sasl 
       connections. Possible values are authentication, integrity and privacy.
       authentication means authentication only and no integrity or privacy; 
       integrity implies authentication and integrity are enabled; and privacy 
@@ -530,6 +530,31 @@
   <value>67108864</value>
   <description>Block size to use when reading files using the native S3
   filesystem (s3n: URIs).</description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.uploads.enabled</name>
+  <value>false</value>
+  <description>Setting this property to true enables multiple uploads to
+  native S3 filesystem. When uploading a file, it is split into blocks
+  if the size is larger than fs.s3n.multipart.uploads.block.size.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.uploads.block.size</name>
+  <value>67108864</value>
+  <description>The block size for multipart uploads to native S3 filesystem.
+  Default size is 64MB.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.copy.block.size</name>
+  <value>5368709120</value>
+  <description>The block size for multipart copy in native S3 filesystem.
+  Default size is 5GB.
+  </description>
 </property>
 
 <property>
@@ -1273,6 +1298,28 @@
     Mapping should be in this format.
     user1=group1,group2;user2=;user3=group2;
     Default, "dr.who=;" will consider "dr.who" as user without groups.
+  </description>
+</property>
+
+<property>
+  <name>rpc.metrics.quantile.enable</name>
+  <value>false</value>
+  <description>
+    Setting this property to true and rpc.metrics.percentiles.intervals
+    to a comma-separated list of the granularity in seconds, the
+    50/75/90/95/99th percentile latency for rpc queue/processing time in
+    milliseconds are added to rpc metrics.
+  </description>
+</property>
+
+<property>
+  <name>rpc.metrics.percentiles.intervals</name>
+  <value></value>
+  <description>
+    A comma-separated list of the granularity in seconds for the metrics which
+    describe the 50/75/90/95/99th percentile latency for rpc queue/processing
+    time. The metrics are outputted if rpc.metrics.quantile.enable is set to
+    true.
   </description>
 </property>
 </configuration>

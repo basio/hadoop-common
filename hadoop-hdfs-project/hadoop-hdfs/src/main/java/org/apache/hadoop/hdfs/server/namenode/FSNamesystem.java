@@ -36,6 +36,8 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HA_STANDBY_CHECKPOINTS_KE
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOGGERS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOG_ASYNC_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOG_ASYNC_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOG_TOKEN_TRACKING_ID_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AUDIT_LOG_TOKEN_TRACKING_ID_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_DEFAULT;
@@ -122,6 +124,7 @@ import javax.management.StandardMBean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
@@ -139,6 +142,8 @@ import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnresolvedLinkException;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
@@ -168,6 +173,8 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeException;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
@@ -176,6 +183,7 @@ import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager.AccessMode;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager.SecretManagerState;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockCollection;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
@@ -188,18 +196,20 @@ import org.apache.hadoop.hdfs.server.blockmanagement.OutOfV1GenerationStampsExce
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.RollingUpgradeStartupOption;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirType;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.Util;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.SecretManagerSection;
 import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
 import org.apache.hadoop.hdfs.server.namenode.JournalSet.JournalAndStream;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager.Lease;
+import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.namenode.NameNode.OperationCategory;
 import org.apache.hadoop.hdfs.server.namenode.ha.EditLogTailer;
 import org.apache.hadoop.hdfs.server.namenode.ha.HAContext;
-import org.apache.hadoop.hdfs.server.namenode.ha.HAState;
 import org.apache.hadoop.hdfs.server.namenode.ha.StandbyCheckpointer;
 import org.apache.hadoop.hdfs.server.namenode.metrics.FSNamesystemMBean;
 import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
@@ -250,6 +260,9 @@ import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.VersionInfo;
+import org.apache.log4j.Appender;
+import org.apache.log4j.AsyncAppender;
+import org.apache.log4j.Logger;
 import org.mortbay.util.ajax.JSON;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -393,6 +406,14 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   private final CacheManager cacheManager;
   private final DatanodeStatistics datanodeStatistics;
 
+  private RollingUpgradeInfo rollingUpgradeInfo = null;
+  /**
+   * A flag that indicates whether the checkpointer should checkpoint a rollback
+   * fsimage. The edit log tailer sets this flag. The checkpoint will create a
+   * rollback fsimage if the flag is true, and then change the flag to false.
+   */
+  private volatile boolean needRollbackFsImage;
+
   // Block pool ID used by this namenode
   private String blockPoolId;
 
@@ -486,7 +507,10 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   private HAContext haContext;
 
   private final boolean haEnabled;
-  
+
+  /** flag indicating whether replication queues have been initialized */
+  boolean initializedReplQueues = false;
+
   /**
    * Whether the namenode is in the middle of starting the active service
    */
@@ -495,7 +519,9 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   private INodeId inodeId;
   
   private final RetryCache retryCache;
-  
+
+  private final AclConfigFlag aclConfigFlag;
+
   /**
    * Set the last allocated inode id when fsimage or editlog is loaded. 
    */
@@ -536,11 +562,16 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     leaseManager.removeAllLeases();
     inodeId.setCurrentValue(INodeId.LAST_RESERVED_ID);
     snapshotManager.clearSnapshottableDirs();
+    cacheManager.clear();
   }
 
   @VisibleForTesting
   LeaseManager getLeaseManager() {
     return leaseManager;
+  }
+  
+  boolean isHaEnabled() {
+    return haEnabled;
   }
   
   /**
@@ -604,8 +635,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
    * @return an FSNamesystem which contains the loaded namespace
    * @throws IOException if loading fails
    */
-  public static FSNamesystem loadFromDisk(Configuration conf)
-      throws IOException {
+  static FSNamesystem loadFromDisk(Configuration conf) throws IOException {
 
     checkConfiguration(conf);
     FSImage fsImage = new FSImage(conf,
@@ -618,10 +648,8 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     }
 
     long loadStart = now();
-    String nameserviceId = DFSUtil.getNamenodeNameServiceId(conf);
     try {
-      namesystem.loadFSImage(startOpt, fsImage,
-        HAUtil.isHAEnabled(conf, nameserviceId));
+      namesystem.loadFSImage(startOpt);
     } catch (IOException ioe) {
       LOG.warn("Encountered exception loading fsimage", ioe);
       fsImage.close();
@@ -654,6 +682,11 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
    */
   FSNamesystem(Configuration conf, FSImage fsImage, boolean ignoreRetryCache)
       throws IOException {
+    if (conf.getBoolean(DFS_NAMENODE_AUDIT_LOG_ASYNC_KEY,
+                        DFS_NAMENODE_AUDIT_LOG_ASYNC_DEFAULT)) {
+      LOG.info("Enabling async auditlog");
+      enableAsyncAuditLog();
+    }
     boolean fair = conf.getBoolean("dfs.namenode.fslock.fair", true);
     LOG.info("fsLock is fair:" + fair);
     fsLock = new FSNamesystemLock(fair);
@@ -756,6 +789,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       this.isDefaultAuditLogger = auditLoggers.size() == 1 &&
         auditLoggers.get(0) instanceof DefaultAuditLogger;
       this.retryCache = ignoreRetryCache ? null : initRetryCache(conf);
+      this.aclConfigFlag = new AclConfigFlag(conf);
     } catch(IOException e) {
       LOG.error(getClass().getSimpleName() + " initialization failed.", e);
       close();
@@ -788,7 +822,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       retryCache.addCacheEntry(clientId, callId);
     }
   }
-  
+
   @VisibleForTesting
   static RetryCache initRetryCache(Configuration conf) {
     boolean enable = conf.getBoolean(DFS_NAMENODE_ENABLE_RETRY_CACHE_KEY,
@@ -805,7 +839,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
           + " of total heap and retry cache entry expiry time is "
           + entryExpiryMillis + " millis");
       long entryExpiryNanos = entryExpiryMillis * 1000 * 1000;
-      return new RetryCache("Namenode Retry Cache", heapPercent,
+      return new RetryCache("NameNodeRetryCache", heapPercent,
           entryExpiryNanos);
     }
     return null;
@@ -841,8 +875,9 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     return Collections.unmodifiableList(auditLoggers);
   }
 
-  void loadFSImage(StartupOption startOpt, FSImage fsImage, boolean haEnabled)
-      throws IOException {
+  private void loadFSImage(StartupOption startOpt) throws IOException {
+    final FSImage fsImage = getFSImage();
+
     // format before starting up if requested
     if (startOpt == StartupOption.FORMAT) {
       
@@ -855,8 +890,15 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     try {
       // We shouldn't be calling saveNamespace if we've come up in standby state.
       MetaRecoveryContext recovery = startOpt.createRecoveryContext();
-      boolean needToSave =
-        fsImage.recoverTransitionRead(startOpt, this, recovery) && !haEnabled;
+      final boolean staleImage
+          = fsImage.recoverTransitionRead(startOpt, this, recovery);
+      if (RollingUpgradeStartupOption.ROLLBACK.matches(startOpt)) {
+        rollingUpgradeInfo = null;
+      }
+      final boolean needToSave = staleImage && !haEnabled && !isRollingUpgrade(); 
+      LOG.info("Need to save fs image? " + needToSave
+          + " (staleImage=" + staleImage + ", haEnabled=" + haEnabled
+          + ", isRollingUpgrade=" + isRollingUpgrade() + ")");
       if (needToSave) {
         fsImage.saveNamespace(this);
       } else {
@@ -867,7 +909,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       }
       // This will start a new log segment and write to the seen_txid file, so
       // we shouldn't do it when coming up in standby state
-      if (!haEnabled) {
+      if (!haEnabled || (haEnabled && startOpt == StartupOption.UPGRADE)) {
         fsImage.openEditLogForWrite();
       }
       success = true;
@@ -919,8 +961,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     try {
       nnResourceChecker = new NameNodeResourceChecker(conf);
       checkAvailableResources();
-      assert safeMode != null &&
-        !safeMode.isPopulatingReplQueues();
+      assert safeMode != null && !isPopulatingReplQueues();
       StartupProgress prog = NameNode.getStartupProgress();
       prog.beginPhase(Phase.SAFEMODE);
       prog.setTotal(Phase.SAFEMODE, STEP_AWAITING_REPORTED_BLOCKS,
@@ -975,12 +1016,12 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         blockManager.clearQueues();
         blockManager.processAllPendingDNMessages();
 
-        if (!isInSafeMode() ||
-            (isInSafeMode() && safeMode.isPopulatingReplQueues())) {
+        // Only need to re-process the queue, If not in SafeMode.
+        if (!isInSafeMode()) {
           LOG.info("Reprocessing replication and invalidation queues");
-          blockManager.processMisReplicatedBlocks();
+          initializeReplQueues();
         }
-        
+
         if (LOG.isDebugEnabled()) {
           LOG.debug("NameNode metadata after re-processing " +
               "replication and invalidation queues during failover:\n" +
@@ -994,6 +1035,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
 
         dir.fsImage.editLog.openForWrite();
       }
+      
       if (haEnabled) {
         // Renew all of the leases before becoming active.
         // This is because, while we were in standby mode,
@@ -1019,15 +1061,27 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       startingActiveService = false;
     }
   }
+
+  private boolean inActiveState() {
+    return haContext != null &&
+        haContext.getState().getServiceState() == HAServiceState.ACTIVE;
+  }
   
+  /**
+   * Initialize replication queues.
+   */
+  private void initializeReplQueues() {
+    LOG.info("initializing replication queues");
+    blockManager.processMisReplicatedBlocks();
+    initializedReplQueues = true;
+  }
+
   /**
    * @return Whether the namenode is transitioning to active state and is in the
    *         middle of the {@link #startActiveServices()}
    */
   public boolean inTransitionToActive() {
-    return haEnabled && haContext != null
-        && haContext.getState().getServiceState() == HAServiceState.ACTIVE
-        && startingActiveService;
+    return haEnabled && inActiveState() && startingActiveService;
   }
 
   private boolean shouldUseDelegationTokens() {
@@ -1067,6 +1121,9 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       cacheManager.clearDirectiveStats();
       blockManager.getDatanodeManager().clearPendingCachingCommands();
       blockManager.getDatanodeManager().setShouldSendCachingCommands(false);
+      // Don't want to keep replication queues when not in Active.
+      blockManager.clearQueues();
+      initializedReplQueues = false;
     } finally {
       writeUnlock();
     }
@@ -1094,6 +1151,16 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     }
   }
 
+  /**
+   * Called when the NN is in Standby state and the editlog tailer tails the
+   * OP_ROLLING_UPGRADE_START.
+   */
+  void triggerRollbackCheckpoint() {
+    setNeedRollbackFsImage(true);
+    if (standbyCheckpointer != null) {
+      standbyCheckpointer.triggerRollbackCheckpoint();
+    }
+  }
 
   /**
    * Called while the NN is in Standby state, but just about to be
@@ -1141,11 +1208,24 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     if (isInSafeMode()) {
       SafeModeException se = new SafeModeException(errorMsg, safeMode);
       if (haEnabled && haContext != null
-          && haContext.getState().getServiceState() == HAServiceState.ACTIVE) {
+          && haContext.getState().getServiceState() == HAServiceState.ACTIVE
+          && shouldRetrySafeMode(this.safeMode)) {
         throw new RetriableException(se);
       } else {
         throw se;
       }
+    }
+  }
+  
+  /**
+   * We already know that the safemode is on. We will throw a RetriableException
+   * if the safemode is not manual or caused by low resource.
+   */
+  private boolean shouldRetrySafeMode(SafeModeInfo safeMode) {
+    if (safeMode == null) {
+      return false;
+    } else {
+      return !safeMode.isManual() && !safeMode.areResourcesLow();
     }
   }
   
@@ -3393,9 +3473,6 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     HdfsFileStatus stat = null;
     FSPermissionChecker pc = getPermissionChecker();
     checkOperation(OperationCategory.READ);
-    if (!DFSUtil.isValidName(src)) {
-      throw new InvalidPathException("Invalid file name: " + src);
-    }
     byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
     readLock();
     try {
@@ -3780,7 +3857,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     final long diff = fileINode.getPreferredBlockSize() - commitBlock.getNumBytes();    
     if (diff > 0) {
       try {
-        String path = leaseManager.findPath(fileINode);
+        String path = fileINode.getFullPathName();
         dir.updateSpaceConsumed(path, 0, -diff*fileINode.getFileReplication());
       } catch (IOException e) {
         LOG.warn("Unexpected exception while updating disk space.", e);
@@ -3982,7 +4059,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   @VisibleForTesting
   String closeFileCommitBlocks(INodeFile pendingFile, BlockInfo storedBlock)
       throws IOException {
-    String src = leaseManager.findPath(pendingFile);
+    String src = pendingFile.getFullPathName();
 
     // commit the last block and complete it if it has minimum replicas
     commitOrCompleteLastBlock(pendingFile, storedBlock);
@@ -4004,7 +4081,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   @VisibleForTesting
   String persistBlocks(INodeFile pendingFile, boolean logRetryCache)
       throws IOException {
-    String src = leaseManager.findPath(pendingFile);
+    String src = pendingFile.getFullPathName();
     dir.persistBlocks(src, pendingFile, logRetryCache);
     return src;
   }
@@ -4155,21 +4232,22 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         throws IOException {
     readLock();
     try {
+      //get datanode commands
       final int maxTransfer = blockManager.getMaxReplicationStreams()
           - xmitsInProgress;
       DatanodeCommand[] cmds = blockManager.getDatanodeManager().handleHeartbeat(
           nodeReg, reports, blockPoolId, cacheCapacity, cacheUsed,
           xceiverCount, maxTransfer, failedVolumes);
-      return new HeartbeatResponse(cmds, createHaStatusHeartbeat());
+      
+      //create ha status
+      final NNHAStatusHeartbeat haState = new NNHAStatusHeartbeat(
+          haContext.getState().getServiceState(),
+          getFSImage().getLastAppliedOrWrittenTxId());
+
+      return new HeartbeatResponse(cmds, haState, rollingUpgradeInfo);
     } finally {
       readUnlock();
     }
-  }
-
-  private NNHAStatusHeartbeat createHaStatusHeartbeat() {
-    HAState state = haContext.getState();
-    return new NNHAStatusHeartbeat(state.getServiceState(),
-        getFSImage().getLastAppliedOrWrittenTxId());
   }
 
   /**
@@ -4455,6 +4533,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     readLock();
     try {
       checkOperation(OperationCategory.UNCHECKED);
+
       if (!isInSafeMode()) {
         throw new IOException("Safe mode should be turned ON "
             + "in order to create namespace image.");
@@ -4501,11 +4580,11 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     
   void finalizeUpgrade() throws IOException {
     checkSuperuserPrivilege();
-    checkOperation(OperationCategory.WRITE);
+    checkOperation(OperationCategory.UNCHECKED);
     writeLock();
     try {
-      checkOperation(OperationCategory.WRITE);
-      getFSImage().finalizeUpgrade();
+      checkOperation(OperationCategory.UNCHECKED);
+      getFSImage().finalizeUpgrade(this.isHaEnabled() && inActiveState());
     } finally {
       writeUnlock();
     }
@@ -4556,7 +4635,6 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     private int safeReplication;
     /** threshold for populating needed replication queues */
     private double replQueueThreshold;
-      
     // internal fields
     /** Time when threshold was reached.
      * <br> -1 safe mode is off
@@ -4574,8 +4652,6 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     private int blockReplQueueThreshold;
     /** time of the last status printout */
     private long lastStatusReport = 0;
-    /** flag indicating whether replication queues have been initialized */
-    boolean initializedReplQueues = false;
     /** Was safemode entered automatically because available resources were low. */
     private boolean resourcesLow = false;
     /** Should safemode adjust its block totals as blocks come in */
@@ -4635,7 +4711,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
      * 
      * @see SafeModeInfo
      */
-    private SafeModeInfo(boolean resourcesLow, boolean isReplQueuesInited) {
+    private SafeModeInfo(boolean resourcesLow) {
       this.threshold = 1.5f;  // this threshold can never be reached
       this.datanodeThreshold = Integer.MAX_VALUE;
       this.extension = Integer.MAX_VALUE;
@@ -4644,7 +4720,6 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       this.blockTotal = -1;
       this.blockSafe = -1;
       this.resourcesLow = resourcesLow;
-      this.initializedReplQueues = isReplQueuesInited;
       enter();
       reportStatus("STATE* Safe mode is ON.", true);
     }
@@ -4658,13 +4733,6 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       return this.reached >= 0;
     }
       
-    /**
-     * Check if we are populating replication queues.
-     */
-    private synchronized boolean isPopulatingReplQueues() {
-      return initializedReplQueues;
-    }
-
     /**
      * Enter safe mode.
      */
@@ -4709,21 +4777,6 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         prog.endStep(Phase.SAFEMODE, STEP_AWAITING_REPORTED_BLOCKS);
         prog.endPhase(Phase.SAFEMODE);
       }
-    }
-
-    /**
-     * Initialize replication queues.
-     */
-    private synchronized void initializeReplQueues() {
-      LOG.info("initializing replication queues");
-      assert !isPopulatingReplQueues() : "Already initialized repl queues";
-      long startTimeMisReplicatedScan = now();
-      blockManager.processMisReplicatedBlocks();
-      initializedReplQueues = true;
-      NameNode.stateChangeLog.info("STATE* Replication Queue initialization "
-          + "scan for invalid, over- and under-replicated blocks "
-          + "completed in " + (now() - startTimeMisReplicatedScan)
-          + " msec");
     }
 
     /**
@@ -4773,7 +4826,8 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       if (smmthread == null && needEnter()) {
         enter();
         // check if we are ready to initialize replication queues
-        if (canInitializeReplQueues() && !isPopulatingReplQueues()) {
+        if (canInitializeReplQueues() && !isPopulatingReplQueues()
+            && !haEnabled) {
           initializeReplQueues();
         }
         reportStatus("STATE* Safe mode ON.", false);
@@ -4798,7 +4852,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       }
 
       // check if we are ready to initialize replication queues
-      if (canInitializeReplQueues() && !isPopulatingReplQueues()) {
+      if (canInitializeReplQueues() && !isPopulatingReplQueues() && !haEnabled) {
         initializeReplQueues();
       }
     }
@@ -5108,11 +5162,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     if (!shouldPopulateReplQueues()) {
       return false;
     }
-    // safeMode is volatile, and may be set to null at any time
-    SafeModeInfo safeMode = this.safeMode;
-    if (safeMode == null)
-      return true;
-    return safeMode.isPopulatingReplQueues();
+    return initializedReplQueues;
   }
 
   private boolean shouldPopulateReplQueues() {
@@ -5232,7 +5282,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         getEditLog().logSyncAll();
       }
       if (!isInSafeMode()) {
-        safeMode = new SafeModeInfo(resourcesLow, isPopulatingReplQueues());
+        safeMode = new SafeModeInfo(resourcesLow);
         return;
       }
       if (resourcesLow) {
@@ -5307,8 +5357,8 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     NamenodeCommand cmd = null;
     try {
       checkOperation(OperationCategory.CHECKPOINT);
-
       checkNameNodeSafeMode("Checkpoint not started");
+      
       LOG.info("Start checkpoint for " + backupNode.getAddress());
       cmd = getFSImage().startCheckpoint(backupNode, activeNamenode);
       getEditLog().logSync();
@@ -5932,7 +5982,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         .getDatanodeStorageInfos(newNodes, newStorageIDs);
     blockinfo.setExpectedLocations(storages);
 
-    String src = leaseManager.findPath(pendingFile);
+    String src = pendingFile.getFullPathName();
     dir.persistBlocks(src, pendingFile, logRetryCache);
   }
 
@@ -5976,6 +6026,15 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
         FSImageSerialization.writeINodeUnderConstruction(
             out, entry.getValue(), b.toString());
       }
+    }
+  }
+
+  /**
+   * @return all the under-construction files in the lease map
+   */
+  Map<String, INodeFile> getFilesUnderConstruction() {
+    synchronized (leaseManager) {
+      return leaseManager.getINodesUnderConstruction();
     }
   }
 
@@ -6255,11 +6314,21 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     dtSecretManager.saveSecretManagerStateCompat(out, sdPath);
   }
 
+  SecretManagerState saveSecretManagerState() {
+    return dtSecretManager.saveSecretManagerState();
+  }
+
   /**
    * @param in load the state of secret manager from input stream
    */
   void loadSecretManagerStateCompat(DataInput in) throws IOException {
     dtSecretManager.loadSecretManagerStateCompat(in);
+  }
+
+  void loadSecretManagerState(SecretManagerSection s,
+      List<SecretManagerSection.DelegationKey> keys,
+      List<SecretManagerSection.PersistToken> tokens) throws IOException {
+    dtSecretManager.loadSecretManagerState(new SecretManagerState(s, keys, tokens));
   }
 
   /**
@@ -6787,13 +6856,19 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     return this.blockManager.getDatanodeManager()
         .shouldAvoidStaleDataNodesForWrite();
   }
-  
+
+  @Override // FSClusterStats
+  public int getNumDatanodesInService() {
+    return getNumLiveDataNodes() - getNumDecomLiveDataNodes();
+  }
+
   public SnapshotManager getSnapshotManager() {
     return snapshotManager;
   }
   
   /** Allow snapshot on a directroy. */
   void allowSnapshot(String path) throws SafeModeException, IOException {
+    checkOperation(OperationCategory.WRITE);
     writeLock();
     try {
       checkOperation(OperationCategory.WRITE);
@@ -6819,6 +6894,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   
   /** Disallow snapshot on a directory. */
   void disallowSnapshot(String path) throws SafeModeException, IOException {
+    checkOperation(OperationCategory.WRITE);
     writeLock();
     try {
       checkOperation(OperationCategory.WRITE);
@@ -6942,6 +7018,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   public SnapshottableDirectoryStatus[] getSnapshottableDirListing()
       throws IOException {
     SnapshottableDirectoryStatus[] status = null;
+    checkOperation(OperationCategory.READ);
     final FSPermissionChecker checker = getPermissionChecker();
     readLock();
     try {
@@ -6975,6 +7052,7 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
   SnapshotDiffReport getSnapshotDiffReport(String path,
       String fromSnapshot, String toSnapshot) throws IOException {
     SnapshotDiffInfo diffs = null;
+    checkOperation(OperationCategory.READ);
     final FSPermissionChecker pc = getPermissionChecker();
     readLock();
     try {
@@ -7066,6 +7144,173 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     if (snapshotManager != null) {
       snapshotManager.removeSnapshottable(toRemove);
     }
+  }
+
+  RollingUpgradeInfo queryRollingUpgrade() throws IOException {
+    checkSuperuserPrivilege();
+    checkOperation(OperationCategory.READ);
+    readLock();
+    try {
+      if (rollingUpgradeInfo != null) {
+        boolean hasRollbackImage = this.getFSImage().hasRollbackFSImage();
+        rollingUpgradeInfo.setCreatedRollbackImages(hasRollbackImage);
+      }
+      return rollingUpgradeInfo;
+    } finally {
+      readUnlock();
+    }
+  }
+
+  RollingUpgradeInfo startRollingUpgrade() throws IOException {
+    checkSuperuserPrivilege();
+    checkOperation(OperationCategory.WRITE);
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      long startTime = now();
+      if (!haEnabled) { // for non-HA, we require NN to be in safemode
+        startRollingUpgradeInternalForNonHA(startTime);
+      } else { // for HA, NN cannot be in safemode
+        checkNameNodeSafeMode("Failed to start rolling upgrade");
+        startRollingUpgradeInternal(startTime);
+      }
+
+      getEditLog().logStartRollingUpgrade(rollingUpgradeInfo.getStartTime());
+      if (haEnabled) {
+        // roll the edit log to make sure the standby NameNode can tail
+        getFSImage().rollEditLog();
+      }
+    } finally {
+      writeUnlock();
+    }
+
+    getEditLog().logSync();
+    if (auditLog.isInfoEnabled() && isExternalInvocation()) {
+      logAuditEvent(true, "startRollingUpgrade", null, null, null);
+    }
+    return rollingUpgradeInfo;
+  }
+
+  /**
+   * Update internal state to indicate that a rolling upgrade is in progress.
+   * @param startTime
+   */
+  void startRollingUpgradeInternal(long startTime)
+      throws IOException {
+    checkRollingUpgrade("start rolling upgrade");
+    getFSImage().checkUpgrade(this);
+    setRollingUpgradeInfo(false, startTime);
+  }
+
+  /**
+   * Update internal state to indicate that a rolling upgrade is in progress for
+   * non-HA setup. This requires the namesystem is in SafeMode and after doing a
+   * checkpoint for rollback the namesystem will quit the safemode automatically 
+   */
+  private void startRollingUpgradeInternalForNonHA(long startTime)
+      throws IOException {
+    Preconditions.checkState(!haEnabled);
+    if (!isInSafeMode()) {
+      throw new IOException("Safe mode should be turned ON "
+          + "in order to create namespace image.");
+    }
+    checkRollingUpgrade("start rolling upgrade");
+    getFSImage().checkUpgrade(this);
+    // in non-HA setup, we do an extra ckpt to generate a rollback image
+    getFSImage().saveNamespace(this, NameNodeFile.IMAGE_ROLLBACK, null);
+    LOG.info("Successfully saved namespace for preparing rolling upgrade.");
+
+    // leave SafeMode automatically
+    setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+    setRollingUpgradeInfo(true, startTime);
+  }
+
+  void setRollingUpgradeInfo(boolean createdRollbackImages, long startTime) {
+    rollingUpgradeInfo = new RollingUpgradeInfo(blockPoolId,
+        createdRollbackImages, startTime, 0L);
+  }
+
+  public void setCreatedRollbackImages(boolean created) {
+    if (rollingUpgradeInfo != null) {
+      rollingUpgradeInfo.setCreatedRollbackImages(created);
+    }
+  }
+
+  public RollingUpgradeInfo getRollingUpgradeInfo() {
+    return rollingUpgradeInfo;
+  }
+
+  public boolean isNeedRollbackFsImage() {
+    return needRollbackFsImage;
+  }
+
+  public void setNeedRollbackFsImage(boolean needRollbackFsImage) {
+    this.needRollbackFsImage = needRollbackFsImage;
+  }
+
+  @Override  // NameNodeMXBean
+  public RollingUpgradeInfo.Bean getRollingUpgradeStatus() {
+    readLock();
+    try {
+      RollingUpgradeInfo upgradeInfo = getRollingUpgradeInfo();
+      if (upgradeInfo != null) {
+        return new RollingUpgradeInfo.Bean(upgradeInfo);
+      }
+      return null;
+    } finally {
+      readUnlock();
+    }
+  }
+
+  /** Is rolling upgrade in progress? */
+  public boolean isRollingUpgrade() {
+    return rollingUpgradeInfo != null;
+  }
+
+  void checkRollingUpgrade(String action) throws RollingUpgradeException {
+    if (isRollingUpgrade()) {
+      throw new RollingUpgradeException("Failed to " + action
+          + " since a rolling upgrade is already in progress."
+          + " Existing rolling upgrade info:\n" + rollingUpgradeInfo);
+    }
+  }
+
+  RollingUpgradeInfo finalizeRollingUpgrade() throws IOException {
+    checkSuperuserPrivilege();
+    checkOperation(OperationCategory.WRITE);
+    writeLock();
+    final RollingUpgradeInfo returnInfo;
+    try {
+      checkOperation(OperationCategory.WRITE);
+      checkNameNodeSafeMode("Failed to finalize rolling upgrade");
+
+      returnInfo = finalizeRollingUpgradeInternal(now());
+      getEditLog().logFinalizeRollingUpgrade(returnInfo.getFinalizeTime());
+      getFSImage().saveNamespace(this);
+      getFSImage().renameCheckpoint(NameNodeFile.IMAGE_ROLLBACK,
+          NameNodeFile.IMAGE);
+    } finally {
+      writeUnlock();
+    }
+
+    // getEditLog().logSync() is not needed since it does saveNamespace 
+
+    if (auditLog.isInfoEnabled() && isExternalInvocation()) {
+      logAuditEvent(true, "finalizeRollingUpgrade", null, null, null);
+    }
+    return returnInfo;
+  }
+
+  RollingUpgradeInfo finalizeRollingUpgradeInternal(long finalizeTime)
+      throws RollingUpgradeException {
+    if (!isRollingUpgrade()) {
+      throw new RollingUpgradeException(
+          "Failed to finalize rolling upgrade since there is no rolling upgrade in progress.");
+    }
+
+    final long startTime = rollingUpgradeInfo.getStartTime();
+    rollingUpgradeInfo = null;
+    return new RollingUpgradeInfo(blockPoolId, false, startTime, finalizeTime);
   }
 
   long addCacheDirective(CacheDirectiveInfo directive, EnumSet<CacheFlag> flags)
@@ -7324,6 +7569,127 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
     return results;
   }
 
+  void modifyAclEntries(String src, List<AclEntry> aclSpec) throws IOException {
+    aclConfigFlag.checkForApiCall();
+    HdfsFileStatus resultingStat = null;
+    FSPermissionChecker pc = getPermissionChecker();
+    checkOperation(OperationCategory.WRITE);
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      checkNameNodeSafeMode("Cannot modify ACL entries on " + src);
+      src = FSDirectory.resolvePath(src, pathComponents, dir);
+      checkOwner(pc, src);
+      dir.modifyAclEntries(src, aclSpec);
+      resultingStat = getAuditFileInfo(src, false);
+    } finally {
+      writeUnlock();
+    }
+    getEditLog().logSync();
+    logAuditEvent(true, "modifyAclEntries", src, null, resultingStat);
+  }
+
+  void removeAclEntries(String src, List<AclEntry> aclSpec) throws IOException {
+    aclConfigFlag.checkForApiCall();
+    HdfsFileStatus resultingStat = null;
+    FSPermissionChecker pc = getPermissionChecker();
+    checkOperation(OperationCategory.WRITE);
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      checkNameNodeSafeMode("Cannot remove ACL entries on " + src);
+      src = FSDirectory.resolvePath(src, pathComponents, dir);
+      checkOwner(pc, src);
+      dir.removeAclEntries(src, aclSpec);
+      resultingStat = getAuditFileInfo(src, false);
+    } finally {
+      writeUnlock();
+    }
+    getEditLog().logSync();
+    logAuditEvent(true, "removeAclEntries", src, null, resultingStat);
+  }
+
+  void removeDefaultAcl(String src) throws IOException {
+    aclConfigFlag.checkForApiCall();
+    HdfsFileStatus resultingStat = null;
+    FSPermissionChecker pc = getPermissionChecker();
+    checkOperation(OperationCategory.WRITE);
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      checkNameNodeSafeMode("Cannot remove default ACL entries on " + src);
+      src = FSDirectory.resolvePath(src, pathComponents, dir);
+      checkOwner(pc, src);
+      dir.removeDefaultAcl(src);
+      resultingStat = getAuditFileInfo(src, false);
+    } finally {
+      writeUnlock();
+    }
+    getEditLog().logSync();
+    logAuditEvent(true, "removeDefaultAcl", src, null, resultingStat);
+  }
+
+  void removeAcl(String src) throws IOException {
+    aclConfigFlag.checkForApiCall();
+    HdfsFileStatus resultingStat = null;
+    FSPermissionChecker pc = getPermissionChecker();
+    checkOperation(OperationCategory.WRITE);
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      checkNameNodeSafeMode("Cannot remove ACL on " + src);
+      src = FSDirectory.resolvePath(src, pathComponents, dir);
+      checkOwner(pc, src);
+      dir.removeAcl(src);
+      resultingStat = getAuditFileInfo(src, false);
+    } finally {
+      writeUnlock();
+    }
+    getEditLog().logSync();
+    logAuditEvent(true, "removeAcl", src, null, resultingStat);
+  }
+
+  void setAcl(String src, List<AclEntry> aclSpec) throws IOException {
+    aclConfigFlag.checkForApiCall();
+    HdfsFileStatus resultingStat = null;
+    FSPermissionChecker pc = getPermissionChecker();
+    checkOperation(OperationCategory.WRITE);
+    byte[][] pathComponents = FSDirectory.getPathComponentsForReservedPath(src);
+    writeLock();
+    try {
+      checkOperation(OperationCategory.WRITE);
+      checkNameNodeSafeMode("Cannot set ACL on " + src);
+      src = FSDirectory.resolvePath(src, pathComponents, dir);
+      checkOwner(pc, src);
+      dir.setAcl(src, aclSpec);
+      resultingStat = getAuditFileInfo(src, false);
+    } finally {
+      writeUnlock();
+    }
+    getEditLog().logSync();
+    logAuditEvent(true, "setAcl", src, null, resultingStat);
+  }
+
+  AclStatus getAclStatus(String src) throws IOException {
+    aclConfigFlag.checkForApiCall();
+    FSPermissionChecker pc = getPermissionChecker();
+    checkOperation(OperationCategory.READ);
+    readLock();
+    try {
+      checkOperation(OperationCategory.READ);
+      if (isPermissionEnabled) {
+        checkPermission(pc, src, false, null, null, null, null);
+      }
+      return dir.getAclStatus(src);
+    } finally {
+      readUnlock();
+    }
+  }
+
   /**
    * Default AuditLogger implementation; used when no access logger is
    * defined in the config file. It can also be explicitly listed in the
@@ -7385,5 +7751,27 @@ public class FSNamesystem implements Namesystem, FSClusterStats,
       auditLog.info(message);
     }
   }
+
+  private static void enableAsyncAuditLog() {
+    if (!(auditLog instanceof Log4JLogger)) {
+      LOG.warn("Log4j is required to enable async auditlog");
+      return;
+    }
+    Logger logger = ((Log4JLogger)auditLog).getLogger();
+    @SuppressWarnings("unchecked")
+    List<Appender> appenders = Collections.list(logger.getAllAppenders());
+    // failsafe against trying to async it more than once
+    if (!appenders.isEmpty() && !(appenders.get(0) instanceof AsyncAppender)) {
+      AsyncAppender asyncAppender = new AsyncAppender();
+      // change logger to have an async appender containing all the
+      // previously configured appenders
+      for (Appender appender : appenders) {
+        logger.removeAppender(appender);
+        asyncAppender.addAppender(appender);
+      }
+      logger.addAppender(asyncAppender);        
+    }
+  }
+
 }
 

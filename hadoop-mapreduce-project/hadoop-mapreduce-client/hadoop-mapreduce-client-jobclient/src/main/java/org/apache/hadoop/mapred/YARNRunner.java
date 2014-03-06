@@ -21,7 +21,9 @@ package org.apache.hadoop.mapred;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Vector;
@@ -186,8 +188,7 @@ public class YARNRunner implements ClientProtocol {
        * to make sure we add history server delegation tokens to the credentials
        */
       RMDelegationTokenSelector tokenSelector = new RMDelegationTokenSelector();
-      Text service = SecurityUtil.buildTokenService(resMgrDelegate
-          .getConnectAddress());
+      Text service = resMgrDelegate.getRMDelegationTokenService();
       if (tokenSelector.selectToken(service, ts.getAllTokens()) != null) {
         Text hsService = SecurityUtil.buildTokenService(hsProxy
             .getConnectAddress());
@@ -389,7 +390,8 @@ public class YARNRunner implements ClientProtocol {
     vargs.add(Environment.JAVA_HOME.$() + "/bin/java");
 
     // TODO: why do we use 'conf' some places and 'jobConf' others?
-    long logSize = TaskLog.getTaskLogLength(new JobConf(conf));
+    long logSize = jobConf.getLong(MRJobConfig.MR_AM_LOG_KB,
+        MRJobConfig.DEFAULT_MR_AM_LOG_KB) << 10;
     String logLevel = jobConf.get(
         MRJobConfig.MR_AM_LOG_LEVEL, MRJobConfig.DEFAULT_MR_AM_LOG_LEVEL);
     int numBackups = jobConf.getInt(MRJobConfig.MR_AM_LOG_BACKUPS,
@@ -467,6 +469,8 @@ public class YARNRunner implements ClientProtocol {
         ContainerLaunchContext.newInstance(localResources, environment,
           vargsFinal, null, securityTokens, acls);
 
+    Collection<String> tagsFromConf =
+        jobConf.getTrimmedStringCollection(MRJobConfig.JOB_TAGS);
 
     // Set up the ApplicationSubmissionContext
     ApplicationSubmissionContext appContext =
@@ -486,6 +490,9 @@ public class YARNRunner implements ClientProtocol {
             MRJobConfig.DEFAULT_MR_AM_MAX_ATTEMPTS));
     appContext.setResource(capability);
     appContext.setApplicationType(MRJobConfig.MR_APPLICATION_TYPE);
+    if (tagsFromConf != null && !tagsFromConf.isEmpty()) {
+      appContext.setApplicationTags(new HashSet<String>(tagsFromConf));
+    }
     return appContext;
   }
 

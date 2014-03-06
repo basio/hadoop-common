@@ -24,6 +24,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -47,7 +48,7 @@ import org.apache.hadoop.yarn.proto.YarnServerResourceManagerServiceProtos.Appli
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerServiceProtos.ApplicationStateDataProto;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerServiceProtos.RMStateVersionProto;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
-import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
+import org.apache.hadoop.yarn.server.resourcemanager.RMZKUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.RMStateVersion;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationAttemptStateDataPBImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationStateDataPBImpl;
@@ -74,6 +75,7 @@ import com.google.common.annotations.VisibleForTesting;
 public class ZKRMStateStore extends RMStateStore {
 
   public static final Log LOG = LogFactory.getLog(ZKRMStateStore.class);
+  private final SecureRandom random = new SecureRandom();
 
   protected static final String ROOT_ZNODE_NAME = "ZKRMStateRoot";
   protected static final RMStateVersion CURRENT_VERSION_INFO = RMStateVersion
@@ -90,6 +92,7 @@ public class ZKRMStateStore extends RMStateStore {
   private int zkSessionTimeout;
   private long zkRetryInterval;
   private List<ACL> zkAcl;
+  private List<ZKUtil.ZKAuthInfo> zkAuths;
 
   /**
    *
@@ -136,6 +139,9 @@ public class ZKRMStateStore extends RMStateStore {
   private String fencingNodePath;
   private Op createFencingNodePathOp;
   private Op deleteFencingNodePathOp;
+  private Thread verifyActiveStatusThread;
+  private String zkRootNodeUsername;
+  private final String zkRootNodePassword = Long.toString(random.nextLong());
 
   @VisibleForTesting
   List<ACL> zkRootNodeAcl;
@@ -144,9 +150,6 @@ public class ZKRMStateStore extends RMStateStore {
       ZooDefs.Perms.CREATE | ZooDefs.Perms.DELETE;
   private final String zkRootNodeAuthScheme =
       new DigestAuthenticationProvider().getScheme();
-
-  private String zkRootNodeUsername;
-  private String zkRootNodePassword;
 
   /**
    * Given the {@link Configuration} and {@link ACL}s used (zkAcl) for
@@ -172,7 +175,6 @@ public class ZKRMStateStore extends RMStateStore {
     zkRootNodeUsername = HAUtil.getConfValueForRMInstance(
         YarnConfiguration.RM_ADDRESS,
         YarnConfiguration.DEFAULT_RM_ADDRESS, conf);
-    zkRootNodePassword = Long.toString(ResourceManager.getClusterTimeStamp());
     Id rmId = new Id(zkRootNodeAuthScheme,
         DigestAuthenticationProvider.generateDigest(
             zkRootNodeUsername + ":" + zkRootNodePassword));
@@ -200,18 +202,9 @@ public class ZKRMStateStore extends RMStateStore {
     zkRetryInterval =
         conf.getLong(YarnConfiguration.RM_ZK_RETRY_INTERVAL_MS,
           YarnConfiguration.DEFAULT_RM_ZK_RETRY_INTERVAL_MS);
-    // Parse authentication from configuration.
-    String zkAclConf =
-        conf.get(YarnConfiguration.RM_ZK_ACL,
-            YarnConfiguration.DEFAULT_RM_ZK_ACL);
-    zkAclConf = ZKUtil.resolveConfIndirection(zkAclConf);
 
-    try {
-      zkAcl = ZKUtil.parseACLs(zkAclConf);
-    } catch (ZKUtil.BadAclFormatException bafe) {
-      LOG.error("Invalid format for " + YarnConfiguration.RM_ZK_ACL);
-      throw bafe;
-    }
+    zkAcl = RMZKUtils.getZKAcls(conf);
+    zkAuths = RMZKUtils.getZKAuths(conf);
 
     zkRootNodePath = getNodePath(znodeWorkingPath, ROOT_ZNODE_NAME);
     rmAppRoot = getNodePath(zkRootNodePath, RM_APP_ROOT);
@@ -259,6 +252,8 @@ public class ZKRMStateStore extends RMStateStore {
     createRootDir(zkRootNodePath);
     if (HAUtil.isHAEnabled(getConfig())){
       fence();
+      verifyActiveStatusThread = new VerifyActiveStatusThread();
+      verifyActiveStatusThread.start();
     }
     createRootDir(rmAppRoot);
     createRootDir(rmDTSecretManagerRoot);
@@ -351,6 +346,10 @@ public class ZKRMStateStore extends RMStateStore {
 
   @Override
   protected synchronized void closeInternal() throws Exception {
+    if (verifyActiveStatusThread != null) {
+      verifyActiveStatusThread.interrupt();
+      verifyActiveStatusThread.join(1000);
+    }
     closeZkClients();
   }
 
@@ -857,6 +856,32 @@ public class ZKRMStateStore extends RMStateStore {
     }.runWithRetries();
   }
 
+  /**
+   * Helper class that periodically attempts creating a znode to ensure that
+   * this RM continues to be the Active.
+   */
+  private class VerifyActiveStatusThread extends Thread {
+    private List<Op> emptyOpList = new ArrayList<Op>();
+
+    VerifyActiveStatusThread() {
+      super(VerifyActiveStatusThread.class.getName());
+    }
+
+    public void run() {
+      try {
+        while (true) {
+          doMultiWithRetries(emptyOpList);
+          Thread.sleep(zkSessionTimeout);
+        }
+      } catch (InterruptedException ie) {
+        LOG.info(VerifyActiveStatusThread.class.getName() + " thread " +
+            "interrupted! Exiting!");
+      } catch (Exception e) {
+        notifyStoreOperationFailed(new StoreFencedException());
+      }
+    }
+  }
+
   private abstract class ZKAction<T> {
     // run() expects synchronization on ZKRMStateStore.this
     abstract T run() throws KeeperException, InterruptedException;
@@ -920,6 +945,9 @@ public class ZKRMStateStore extends RMStateStore {
         retries++) {
       try {
         zkClient = getNewZooKeeper();
+        for (ZKUtil.ZKAuthInfo zkAuth : zkAuths) {
+          zkClient.addAuthInfo(zkAuth.getScheme(), zkAuth.getAuth());
+        }
         if (useDefaultFencingScheme) {
           zkClient.addAuthInfo(zkRootNodeAuthScheme,
               (zkRootNodeUsername + ":" + zkRootNodePassword).getBytes());

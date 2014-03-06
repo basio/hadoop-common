@@ -57,7 +57,6 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.Progressable;
@@ -98,9 +97,10 @@ public class HftpFileSystem extends FileSystem
   public static final String HFTP_TIMEZONE = "UTC";
   public static final String HFTP_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ssZ";
 
-  protected TokenAspect<HftpFileSystem> tokenAspect;
+  protected TokenAspect<? extends HftpFileSystem> tokenAspect;
   private Token<?> delegationToken;
   private Token<?> renewToken;
+  protected Text tokenServiceName;
 
   @Override
   public URI getCanonicalUri() {
@@ -123,8 +123,7 @@ public class HftpFileSystem extends FileSystem
 
   @Override
   protected int getDefaultPort() {
-    return getConf().getInt(DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_KEY,
-        DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT);
+    return DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT;
   }
 
   /**
@@ -176,9 +175,8 @@ public class HftpFileSystem extends FileSystem
    * Initialize connectionFactory and tokenAspect. This function is intended to
    * be overridden by HsFtpFileSystem.
    */
-  protected void initTokenAspect(Configuration conf)
-      throws IOException {
-    tokenAspect = new TokenAspect<HftpFileSystem>(this, TOKEN_KIND);
+  protected void initTokenAspect() {
+    tokenAspect = new TokenAspect<HftpFileSystem>(this, tokenServiceName, TOKEN_KIND);
   }
 
   @Override
@@ -190,6 +188,7 @@ public class HftpFileSystem extends FileSystem
         .newDefaultURLConnectionFactory(conf);
     this.ugi = UserGroupInformation.getCurrentUser();
     this.nnUri = getNamenodeUri(name);
+    this.tokenServiceName = SecurityUtil.buildTokenService(nnUri);
 
     try {
       this.hftpURI = new URI(name.getScheme(), name.getAuthority(),
@@ -198,7 +197,7 @@ public class HftpFileSystem extends FileSystem
       throw new IllegalArgumentException(e);
     }
 
-    initTokenAspect(conf);
+    initTokenAspect();
     if (UserGroupInformation.isSecurityEnabled()) {
       tokenAspect.initDelegationToken(ugi);
     }
@@ -234,17 +233,23 @@ public class HftpFileSystem extends FileSystem
   }
 
   @Override
-  public synchronized Token<?> getDelegationToken(final String renewer
-                                                  ) throws IOException {
+  public synchronized Token<?> getDelegationToken(final String renewer)
+      throws IOException {
     try {
-      //Renew TGT if needed
-      ugi.checkTGTAndReloginFromKeytab();
-      return ugi.doAs(new PrivilegedExceptionAction<Token<?>>() {
+      // Renew TGT if needed
+      UserGroupInformation connectUgi = ugi.getRealUser();
+      final String proxyUser = connectUgi == null ? null : ugi
+          .getShortUserName();
+      if (connectUgi == null) {
+        connectUgi = ugi;
+      }
+      return connectUgi.doAs(new PrivilegedExceptionAction<Token<?>>() {
         @Override
         public Token<?> run() throws IOException {
           Credentials c;
           try {
-            c = DelegationTokenFetcher.getDTfromRemote(connectionFactory, nnUri, renewer);
+            c = DelegationTokenFetcher.getDTfromRemote(connectionFactory,
+                nnUri, renewer, proxyUser);
           } catch (IOException e) {
             if (e.getCause() instanceof ConnectException) {
               LOG.warn("Couldn't connect to " + nnUri +
@@ -299,13 +304,13 @@ public class HftpFileSystem extends FileSystem
    * @return user_shortname,group1,group2...
    */
   private String getEncodedUgiParameter() {
-    StringBuilder ugiParamenter = new StringBuilder(
+    StringBuilder ugiParameter = new StringBuilder(
         ServletUtil.encodeQueryValue(ugi.getShortUserName()));
     for(String g: ugi.getGroupNames()) {
-      ugiParamenter.append(",");
-      ugiParamenter.append(ServletUtil.encodeQueryValue(g));
+      ugiParameter.append(",");
+      ugiParameter.append(ServletUtil.encodeQueryValue(g));
     }
-    return ugiParamenter.toString();
+    return ugiParameter.toString();
   }
 
   /**
@@ -339,14 +344,15 @@ public class HftpFileSystem extends FileSystem
   }
 
   static class RangeHeaderUrlOpener extends ByteRangeInputStream.URLOpener {
-    URLConnectionFactory connectionFactory = URLConnectionFactory.DEFAULT_SYSTEM_CONNECTION_FACTORY;
+    private final URLConnectionFactory connFactory;
 
-    RangeHeaderUrlOpener(final URL url) {
+    RangeHeaderUrlOpener(URLConnectionFactory connFactory, final URL url) {
       super(url);
+      this.connFactory = connFactory;
     }
 
     protected HttpURLConnection openConnection() throws IOException {
-      return (HttpURLConnection)connectionFactory.openConnection(url);
+      return (HttpURLConnection)connFactory.openConnection(url);
     }
 
     /** Use HTTP Range header for specifying offset. */
@@ -376,8 +382,9 @@ public class HftpFileSystem extends FileSystem
       super(o, r);
     }
 
-    RangeHeaderInputStream(final URL url) {
-      this(new RangeHeaderUrlOpener(url), new RangeHeaderUrlOpener(null));
+    RangeHeaderInputStream(URLConnectionFactory connFactory, final URL url) {
+      this(new RangeHeaderUrlOpener(connFactory, url),
+          new RangeHeaderUrlOpener(connFactory, null));
     }
 
     @Override
@@ -392,7 +399,7 @@ public class HftpFileSystem extends FileSystem
     String path = "/data" + ServletUtil.encodePath(f.toUri().getPath());
     String query = addDelegationTokenParam("ugi=" + getEncodedUgiParameter());
     URL u = getNamenodeURL(path, query);
-    return new FSDataInputStream(new RangeHeaderInputStream(u));
+    return new FSDataInputStream(new RangeHeaderInputStream(connectionFactory, u));
   }
 
   @Override
@@ -675,30 +682,48 @@ public class HftpFileSystem extends FileSystem
 
   @SuppressWarnings("unchecked")
   @Override
-  public long renewDelegationToken(Token<?> token) throws IOException {
+  public long renewDelegationToken(final Token<?> token) throws IOException {
     // update the kerberos credentials, if they are coming from a keytab
-    UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
-    InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
+    UserGroupInformation connectUgi = ugi.getRealUser();
+    if (connectUgi == null) {
+      connectUgi = ugi;
+    }
     try {
-      return DelegationTokenFetcher.renewDelegationToken(connectionFactory,
-          DFSUtil.createUri(getUnderlyingProtocol(), serviceAddr),
-          (Token<DelegationTokenIdentifier>) token);
-    } catch (AuthenticationException e) {
+      return connectUgi.doAs(new PrivilegedExceptionAction<Long>() {
+        @Override
+        public Long run() throws Exception {
+          InetSocketAddress serviceAddr = SecurityUtil
+              .getTokenServiceAddr(token);
+          return DelegationTokenFetcher.renewDelegationToken(connectionFactory,
+              DFSUtil.createUri(getUnderlyingProtocol(), serviceAddr),
+              (Token<DelegationTokenIdentifier>) token);
+        }
+      });
+    } catch (InterruptedException e) {
       throw new IOException(e);
     }
   }
 
   @SuppressWarnings("unchecked")
   @Override
-  public void cancelDelegationToken(Token<?> token) throws IOException {
-    // update the kerberos credentials, if they are coming from a keytab
-    UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
-    InetSocketAddress serviceAddr = SecurityUtil.getTokenServiceAddr(token);
+  public void cancelDelegationToken(final Token<?> token) throws IOException {
+    UserGroupInformation connectUgi = ugi.getRealUser();
+    if (connectUgi == null) {
+      connectUgi = ugi;
+    }
     try {
-      DelegationTokenFetcher.cancelDelegationToken(connectionFactory, DFSUtil
-          .createUri(getUnderlyingProtocol(), serviceAddr),
-          (Token<DelegationTokenIdentifier>) token);
-    } catch (AuthenticationException e) {
+      connectUgi.doAs(new PrivilegedExceptionAction<Void>() {
+        @Override
+        public Void run() throws Exception {
+          InetSocketAddress serviceAddr = SecurityUtil
+              .getTokenServiceAddr(token);
+          DelegationTokenFetcher.cancelDelegationToken(connectionFactory,
+              DFSUtil.createUri(getUnderlyingProtocol(), serviceAddr),
+              (Token<DelegationTokenIdentifier>) token);
+          return null;
+        }
+      });
+    } catch (InterruptedException e) {
       throw new IOException(e);
     }
   }

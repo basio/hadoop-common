@@ -32,12 +32,11 @@ import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.server.common.JspHelper;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
 import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
-import org.apache.hadoop.hdfs.web.AuthFilter;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.resources.Param;
 import org.apache.hadoop.hdfs.web.resources.UserParam;
 import org.apache.hadoop.http.HttpConfig;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -47,7 +46,7 @@ import org.apache.hadoop.security.UserGroupInformation;
  */
 @InterfaceAudience.Private
 public class NameNodeHttpServer {
-  private HttpServer httpServer;
+  private HttpServer2 httpServer;
   private final Configuration conf;
   private final NameNode nn;
   
@@ -68,23 +67,29 @@ public class NameNodeHttpServer {
   }
 
   private void initWebHdfs(Configuration conf) throws IOException {
-    if (WebHdfsFileSystem.isEnabled(conf, HttpServer.LOG)) {
+    if (WebHdfsFileSystem.isEnabled(conf, HttpServer2.LOG)) {
       // set user pattern based on configuration file
-      UserParam.setUserPattern(conf.get(DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY, DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
+      UserParam.setUserPattern(conf.get(
+          DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY,
+          DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
 
-      // add SPNEGO authentication filter for webhdfs
-      final String name = "SPNEGO";
-      final String classname = AuthFilter.class.getName();
+      // add authentication filter for webhdfs
+      final String className = conf.get(
+          DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_KEY,
+          DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_DEFAULT);
+      final String name = className;
+
       final String pathSpec = WebHdfsFileSystem.PATH_PREFIX + "/*";
       Map<String, String> params = getAuthFilterParams(conf);
-      HttpServer.defineFilter(httpServer.getWebAppContext(), name, classname, params,
-          new String[]{pathSpec});
-      HttpServer.LOG.info("Added filter '" + name + "' (class=" + classname + ")");
+      HttpServer2.defineFilter(httpServer.getWebAppContext(), name, className,
+          params, new String[] { pathSpec });
+      HttpServer2.LOG.info("Added filter '" + name + "' (class=" + className
+          + ")");
 
       // add webhdfs packages
-      httpServer.addJerseyResourcePackage(
-          NamenodeWebHdfsMethods.class.getPackage().getName()
-              + ";" + Param.class.getPackage().getName(), pathSpec);
+      httpServer.addJerseyResourcePackage(NamenodeWebHdfsMethods.class
+          .getPackage().getName() + ";" + Param.class.getPackage().getName(),
+          pathSpec);
     }
   }
 
@@ -103,7 +108,7 @@ public class NameNodeHttpServer {
         DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_DEFAULT);
     InetSocketAddress httpsAddr = NetUtils.createSocketAddr(httpsAddrString);
 
-    HttpServer.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
+    HttpServer2.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
         httpAddr, httpsAddr, "hdfs",
         DFSConfigKeys.DFS_NAMENODE_INTERNAL_SPNEGO_USER_NAME_KEY,
         DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY);
@@ -152,7 +157,7 @@ public class NameNodeHttpServer {
               SecurityUtil.getServerPrincipal(principalInConf,
                                               bindAddress.getHostName()));
     } else if (UserGroupInformation.isSecurityEnabled()) {
-      HttpServer.LOG.error(
+      HttpServer2.LOG.error(
           "WebHDFS and security are enabled, but configuration property '" +
           DFSConfigKeys.DFS_WEB_AUTHENTICATION_KERBEROS_PRINCIPAL_KEY +
           "' is not set.");
@@ -164,7 +169,7 @@ public class NameNodeHttpServer {
           DFSConfigKeys.DFS_WEB_AUTHENTICATION_KERBEROS_KEYTAB_KEY,
           httpKeytab);
     } else if (UserGroupInformation.isSecurityEnabled()) {
-      HttpServer.LOG.error(
+      HttpServer2.LOG.error(
           "WebHDFS and security are enabled, but configuration property '" +
           DFSConfigKeys.DFS_WEB_AUTHENTICATION_KERBEROS_KEYTAB_KEY +
           "' is not set.");
@@ -214,7 +219,7 @@ public class NameNodeHttpServer {
     httpServer.setAttribute(STARTUP_PROGRESS_ATTRIBUTE_KEY, prog);
   }
 
-  private static void setupServlets(HttpServer httpServer, Configuration conf) {
+  private static void setupServlets(HttpServer2 httpServer, Configuration conf) {
     httpServer.addInternalServlet("startupProgress",
         StartupProgressServlet.PATH_SPEC, StartupProgressServlet.class);
     httpServer.addInternalServlet("getDelegationToken",

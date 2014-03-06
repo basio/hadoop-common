@@ -17,41 +17,10 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.*;
-import static org.apache.hadoop.util.ExitUtil.terminate;
-
-import java.io.BufferedOutputStream;
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.PrintStream;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.net.SocketException;
-import java.net.SocketTimeoutException;
-import java.net.URI;
-import java.net.UnknownHostException;
-import java.nio.channels.ClosedByInterruptException;
-import java.nio.channels.SocketChannel;
-import java.security.PrivilegedExceptionAction;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
-
-import javax.management.ObjectName;
-
-
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
+import com.google.protobuf.BlockingService;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -68,37 +37,15 @@ import org.apache.hadoop.hdfs.HDFSPolicyProvider;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.net.DomainPeerServer;
 import org.apache.hadoop.hdfs.net.TcpPeerServer;
-import org.apache.hadoop.hdfs.protocol.Block;
-import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
-import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
-import org.apache.hadoop.hdfs.protocol.DatanodeID;
-import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsBlocksMetadata;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
-import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
-import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferEncryptor;
-import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtocol;
-import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
-import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
+import org.apache.hadoop.hdfs.protocol.*;
+import org.apache.hadoop.hdfs.protocol.datatransfer.*;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.ClientDatanodeProtocolService;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.DNTransferAckProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status;
 import org.apache.hadoop.hdfs.protocol.proto.InterDatanodeProtocolProtos.InterDatanodeProtocolService;
-import org.apache.hadoop.hdfs.protocolPB.ClientDatanodeProtocolPB;
-import org.apache.hadoop.hdfs.protocolPB.ClientDatanodeProtocolServerSideTranslatorPB;
-import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
-import org.apache.hadoop.hdfs.protocolPB.InterDatanodeProtocolPB;
-import org.apache.hadoop.hdfs.protocolPB.InterDatanodeProtocolServerSideTranslatorPB;
-import org.apache.hadoop.hdfs.protocolPB.InterDatanodeProtocolTranslatorPB;
-import org.apache.hadoop.hdfs.protocolPB.PBHelper;
-import org.apache.hadoop.hdfs.security.token.block.BlockPoolTokenSecretManager;
-import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
-import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
+import org.apache.hadoop.hdfs.protocolPB.*;
+import org.apache.hadoop.hdfs.security.token.block.*;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager.AccessMode;
-import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
-import org.apache.hadoop.hdfs.security.token.block.InvalidBlockTokenException;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
@@ -112,15 +59,11 @@ import org.apache.hadoop.hdfs.server.datanode.web.resources.DatanodeWebHdfsMetho
 import org.apache.hadoop.hdfs.server.namenode.FileChecksumServlets;
 import org.apache.hadoop.hdfs.server.namenode.StreamFile;
 import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
-import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
-import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
-import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
-import org.apache.hadoop.hdfs.server.protocol.ReplicaRecoveryInfo;
+import org.apache.hadoop.hdfs.server.protocol.*;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.resources.Param;
 import org.apache.hadoop.http.HttpConfig;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.ReadaheadPool;
 import org.apache.hadoop.io.nativeio.NativeIO;
@@ -139,21 +82,24 @@ import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
-import org.apache.hadoop.util.Daemon;
-import org.apache.hadoop.util.DiskChecker;
+import org.apache.hadoop.util.*;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
-import org.apache.hadoop.util.GenericOptionsParser;
-import org.apache.hadoop.util.JvmPauseMonitor;
-import org.apache.hadoop.util.ServicePlugin;
-import org.apache.hadoop.util.StringUtils;
-import org.apache.hadoop.util.VersionInfo;
 import org.mortbay.util.ajax.JSON;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
-import com.google.protobuf.BlockingService;
+import javax.management.ObjectName;
+import java.io.*;
+import java.lang.management.ManagementFactory;
+import java.net.*;
+import java.nio.channels.ClosedByInterruptException;
+import java.nio.channels.ClosedChannelException;
+import java.nio.channels.SocketChannel;
+import java.security.PrivilegedExceptionAction;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.apache.hadoop.hdfs.DFSConfigKeys.*;
+import static org.apache.hadoop.util.ExitUtil.terminate;
 
 /**********************************************************
  * DataNode is a class (and program) that stores a set of
@@ -210,7 +156,14 @@ public class DataNode extends Configured
   static final Log ClientTraceLog =
     LogFactory.getLog(DataNode.class.getName() + ".clienttrace");
   
-  private static final String USAGE = "Usage: java DataNode [-rollback | -regular]";
+  private static final String USAGE =
+      "Usage: java DataNode [-regular | -rollback | -rollingupgrade rollback]\n" +
+      "    -regular                 : Normal DataNode startup (default).\n" +
+      "    -rollback                : Rollback a standard upgrade.\n" +
+      "    -rollingupgrade rollback : Rollback a rolling upgrade operation.\n" +
+      "  Refer to HDFS documentation for the difference between standard\n" +
+      "  and rolling upgrades.";
+
   static final int CURRENT_BLOCK_FORMAT_VERSION = 1;
 
   /**
@@ -222,6 +175,8 @@ public class DataNode extends Configured
   }
   
   volatile boolean shouldRun = true;
+  volatile boolean shutdownForUpgrade = false;
+  private boolean shutdownInProgress = false;
   private BlockPoolManager blockPoolManager;
   volatile FsDatasetSpi<? extends FsVolumeSpi> data = null;
   private String clusterId = null;
@@ -230,12 +185,13 @@ public class DataNode extends Configured
   AtomicInteger xmitsInProgress = new AtomicInteger();
   Daemon dataXceiverServer = null;
   Daemon localDataXceiverServer = null;
+  ShortCircuitRegistry shortCircuitRegistry = null;
   ThreadGroup threadGroup = null;
   private DNConf dnConf;
   private volatile boolean heartbeatsDisabledForTests = false;
   private DataStorage storage = null;
 
-  private HttpServer infoServer = null;
+  private HttpServer2 infoServer = null;
   private int infoPort;
   private int infoSecurePort;
 
@@ -264,6 +220,7 @@ public class DataNode extends Configured
   private SecureResources secureResources = null;
   private List<StorageLocation> dataDirs;
   private Configuration conf;
+  private String confVersion;
   private final long maxNumberOfBlocksToLog;
 
   private final List<String> usersWithLocalPathAccess;
@@ -291,6 +248,11 @@ public class DataNode extends Configured
     this.getHdfsBlockLocationsEnabled = conf.getBoolean(
         DFSConfigKeys.DFS_HDFS_BLOCKS_METADATA_ENABLED, 
         DFSConfigKeys.DFS_HDFS_BLOCKS_METADATA_ENABLED_DEFAULT);
+
+    confVersion = "core-" +
+        conf.get("hadoop.common.configuration.version", "UNSPECIFIED") +
+        ",hdfs-" +
+        conf.get("hadoop.hdfs.configuration.version", "UNSPECIFIED");
 
     // Determine whether we should try to pass file descriptors to clients.
     if (conf.getBoolean(DFSConfigKeys.DFS_CLIENT_READ_SHORTCIRCUIT_KEY,
@@ -358,17 +320,17 @@ public class DataNode extends Configured
    * Http Policy is decided.
    */
   private void startInfoServer(Configuration conf) throws IOException {
-    HttpServer.Builder builder = new HttpServer.Builder().setName("datanode")
+    HttpServer2.Builder builder = new HttpServer2.Builder().setName("datanode")
         .setConf(conf).setACL(new AccessControlList(conf.get(DFS_ADMIN, " ")));
 
     HttpConfig.Policy policy = DFSUtil.getHttpPolicy(conf);
-    InetSocketAddress infoSocAddr = DataNode.getInfoAddr(conf);
-    String infoHost = infoSocAddr.getHostName();
 
     if (policy.isHttpEnabled()) {
       if (secureResources == null) {
+        InetSocketAddress infoSocAddr = DataNode.getInfoAddr(conf);
         int port = infoSocAddr.getPort();
-        builder.addEndpoint(URI.create("http://" + infoHost + ":" + port));
+        builder.addEndpoint(URI.create("http://"
+            + NetUtils.getHostPortString(infoSocAddr)));
         if (port == 0) {
           builder.setFindPort(true);
         }
@@ -381,7 +343,7 @@ public class DataNode extends Configured
 
     if (policy.isHttpsEnabled()) {
       InetSocketAddress secInfoSocAddr = NetUtils.createSocketAddr(conf.get(
-          DFS_DATANODE_HTTPS_ADDRESS_KEY, infoHost + ":" + 0));
+          DFS_DATANODE_HTTPS_ADDRESS_KEY, DFS_DATANODE_HTTPS_ADDRESS_DEFAULT));
 
       Configuration sslConf = DFSUtil.loadSslConfiguration(conf);
       DFSUtil.loadSslConfToHttpServerBuilder(builder, sslConf);
@@ -390,7 +352,8 @@ public class DataNode extends Configured
       if (port == 0) {
         builder.setFindPort(true);
       }
-      builder.addEndpoint(URI.create("https://" + infoHost + ":" + port));
+      builder.addEndpoint(URI.create("https://"
+          + NetUtils.getHostPortString(secInfoSocAddr)));
     }
 
     this.infoServer = builder.build();
@@ -578,6 +541,7 @@ public class DataNode extends Configured
             domainPeerServer.getBindPath());
       }
     }
+    this.shortCircuitRegistry = new ShortCircuitRegistry(conf);
   }
 
   static DomainPeerServer getDomainPeerServer(Configuration conf,
@@ -1174,27 +1138,28 @@ public class DataNode extends Configured
   }
 
   @Override
-  public HdfsBlocksMetadata getHdfsBlocksMetadata(List<ExtendedBlock> blocks,
+  public HdfsBlocksMetadata getHdfsBlocksMetadata(
+      String bpId, long[] blockIds,
       List<Token<BlockTokenIdentifier>> tokens) throws IOException, 
       UnsupportedOperationException {
     if (!getHdfsBlockLocationsEnabled) {
       throw new UnsupportedOperationException("Datanode#getHdfsBlocksMetadata "
           + " is not enabled in datanode config");
     }
-    if (blocks.size() != tokens.size()) {
+    if (blockIds.length != tokens.size()) {
       throw new IOException("Differing number of blocks and tokens");
     }
     // Check access for each block
-    for (int i = 0; i < blocks.size(); i++) {
-      checkBlockToken(blocks.get(i), tokens.get(i), 
-          BlockTokenSecretManager.AccessMode.READ);
+    for (int i = 0; i < blockIds.length; i++) {
+      checkBlockToken(new ExtendedBlock(bpId, blockIds[i]),
+          tokens.get(i), BlockTokenSecretManager.AccessMode.READ);
     }
-    return data.getHdfsBlocksMetadata(blocks);
+    return data.getHdfsBlocksMetadata(bpId, blockIds);
   }
   
   private void checkBlockToken(ExtendedBlock block, Token<BlockTokenIdentifier> token,
       AccessMode accessMode) throws IOException {
-    if (isBlockTokenEnabled && UserGroupInformation.isSecurityEnabled()) {
+    if (isBlockTokenEnabled) {
       BlockTokenIdentifier id = new BlockTokenIdentifier();
       ByteArrayInputStream buf = new ByteArrayInputStream(token.getIdentifier());
       DataInputStream in = new DataInputStream(buf);
@@ -1230,9 +1195,31 @@ public class DataNode extends Configured
     // offerServices may be modified.
     BPOfferService[] bposArray = this.blockPoolManager == null ? null
         : this.blockPoolManager.getAllNamenodeThreads();
-    this.shouldRun = false;
+    // If shutdown is not for restart, set shouldRun to false early. 
+    if (!shutdownForUpgrade) {
+      shouldRun = false;
+    }
+
+    // When shutting down for restart, DataXceiverServer is interrupted
+    // in order to avoid any further acceptance of requests, but the peers
+    // for block writes are not closed until the clients are notified.
+    if (dataXceiverServer != null) {
+      ((DataXceiverServer) this.dataXceiverServer.getRunnable()).kill();
+      this.dataXceiverServer.interrupt();
+    }
+
+    // Record the time of initial notification
+    long timeNotified = Time.now();
+
+    if (localDataXceiverServer != null) {
+      ((DataXceiverServer) this.localDataXceiverServer.getRunnable()).kill();
+      this.localDataXceiverServer.interrupt();
+    }
+
+    // Terminate directory scanner and block scanner
     shutdownPeriodicScanners();
-    
+
+    // Stop the web server
     if (infoServer != null) {
       try {
         infoServer.stop();
@@ -1240,26 +1227,24 @@ public class DataNode extends Configured
         LOG.warn("Exception shutting down DataNode", e);
       }
     }
-    if (ipcServer != null) {
-      ipcServer.stop();
-    }
     if (pauseMonitor != null) {
       pauseMonitor.stop();
     }
+
+    // shouldRun is set to false here to prevent certain threads from exiting
+    // before the restart prep is done.
+    this.shouldRun = false;
     
-    if (dataXceiverServer != null) {
-      ((DataXceiverServer) this.dataXceiverServer.getRunnable()).kill();
-      this.dataXceiverServer.interrupt();
-    }
-    if (localDataXceiverServer != null) {
-      ((DataXceiverServer) this.localDataXceiverServer.getRunnable()).kill();
-      this.localDataXceiverServer.interrupt();
-    }
     // wait for all data receiver threads to exit
     if (this.threadGroup != null) {
       int sleepMs = 2;
       while (true) {
-        this.threadGroup.interrupt();
+        // When shutting down for restart, wait 2.5 seconds before forcing
+        // termination of receiver threads.
+        if (!this.shutdownForUpgrade || 
+            (this.shutdownForUpgrade && (Time.now() - timeNotified > 2500))) {
+          this.threadGroup.interrupt();
+        }
         LOG.info("Waiting for threadgroup to exit, active threads is " +
                  this.threadGroup.activeCount());
         if (this.threadGroup.activeCount() == 0) {
@@ -1289,7 +1274,13 @@ public class DataNode extends Configured
       } catch (InterruptedException ie) {
       }
     }
-    
+   
+   // IPC server needs to be shutdown late in the process, otherwise
+   // shutdown command response won't get sent.
+   if (ipcServer != null) {
+      ipcServer.stop();
+    }
+
     if(blockPoolManager != null) {
       try {
         this.blockPoolManager.shutDownAll(bposArray);
@@ -1315,6 +1306,14 @@ public class DataNode extends Configured
       MBeans.unregister(dataNodeInfoBeanName);
       dataNodeInfoBeanName = null;
     }
+    if (shortCircuitRegistry != null) shortCircuitRegistry.shutdown();
+    LOG.info("Shutdown complete.");
+    synchronized(this) {
+      // it is already false, but setting it again to avoid a findbug warning.
+      this.shouldRun = false;
+      // Notify the main thread.
+      notifyAll();
+    }
   }
   
   
@@ -1324,12 +1323,7 @@ public class DataNode extends Configured
   protected void checkDiskError(Exception e ) throws IOException {
     
     LOG.warn("checkDiskError: exception: ", e);
-    if (e instanceof SocketException || e instanceof SocketTimeoutException
-    	  || e instanceof ClosedByInterruptException 
-    	  || e.getMessage().startsWith("An established connection was aborted")
-    	  || e.getMessage().startsWith("Broken pipe")
-    	  || e.getMessage().startsWith("Connection reset")
-    	  || e.getMessage().contains("java.nio.channels.SocketChannel")) {
+    if (isNetworkRelatedException(e)) {
       LOG.info("Not checking disk as checkDiskError was called on a network" +
       		" related exception");	
       return;
@@ -1340,6 +1334,28 @@ public class DataNode extends Configured
     } else {
       checkDiskError();
     }
+  }
+  
+  /**
+   * Check if the provided exception looks like it's from a network error
+   * @param e the exception from a checkDiskError call
+   * @return true if this exception is network related, false otherwise
+   */
+  protected boolean isNetworkRelatedException(Exception e) {
+    if (e instanceof SocketException 
+        || e instanceof SocketTimeoutException
+        || e instanceof ClosedChannelException 
+        || e instanceof ClosedByInterruptException) {
+      return true;
+    }
+    
+    String msg = e.getMessage();
+    
+    return null != msg 
+        && (msg.startsWith("An established connection was aborted")
+            || msg.startsWith("Broken pipe")
+            || msg.startsWith("Connection reset")
+            || msg.contains("java.nio.channels.SocketChannel"));
   }
   
   /**
@@ -1770,6 +1786,7 @@ public class DataNode extends Configured
   /** Instantiate & Start a single datanode daemon and wait for it to finish.
    *  If this thread is specifically interrupted, it will stop waiting.
    */
+  @VisibleForTesting
   public static DataNode createDataNode(String args[],
                                  Configuration conf) throws IOException {
     return createDataNode(args, conf, null);
@@ -1778,6 +1795,7 @@ public class DataNode extends Configured
   /** Instantiate & Start a single datanode daemon and wait for it to finish.
    *  If this thread is specifically interrupted, it will stop waiting.
    */
+  @VisibleForTesting
   @InterfaceAudience.Private
   public static DataNode createDataNode(String args[], Configuration conf,
       SecureResources resources) throws IOException {
@@ -1796,7 +1814,11 @@ public class DataNode extends Configured
             && blockPoolManager.getAllNamenodeThreads().length == 0) {
           shouldRun = false;
         }
-        Thread.sleep(2000);
+        // Terminate if shutdown is complete or 2 seconds after all BPs
+        // are shutdown.
+        synchronized(this) {
+          wait(2000);
+        }
       } catch (InterruptedException ex) {
         LOG.warn("Received exception in Datanode#join: " + ex);
       }
@@ -1888,25 +1910,28 @@ public class DataNode extends Configured
    *
    * @return false if passed argements are incorrect
    */
-  private static boolean parseArguments(String args[], 
-                                        Configuration conf) {
-    int argsLen = (args == null) ? 0 : args.length;
+  @VisibleForTesting
+  static boolean parseArguments(String args[], Configuration conf) {
     StartupOption startOpt = StartupOption.REGULAR;
-    for(int i=0; i < argsLen; i++) {
-      String cmd = args[i];
+    int i = 0;
+
+    if (args != null && args.length != 0) {
+      String cmd = args[i++];
       if ("-r".equalsIgnoreCase(cmd) || "--rack".equalsIgnoreCase(cmd)) {
         LOG.error("-r, --rack arguments are not supported anymore. RackID " +
             "resolution is handled by the NameNode.");
-        terminate(1);
-      } else if ("-rollback".equalsIgnoreCase(cmd)) {
-        startOpt = StartupOption.ROLLBACK;
-      } else if ("-regular".equalsIgnoreCase(cmd)) {
-        startOpt = StartupOption.REGULAR;
-      } else
         return false;
+      } else if (StartupOption.ROLLBACK.getName().equalsIgnoreCase(cmd)) {
+        startOpt = StartupOption.ROLLBACK;
+      } else if (StartupOption.REGULAR.getName().equalsIgnoreCase(cmd)) {
+        startOpt = StartupOption.REGULAR;
+      } else {
+        return false;
+      }
     }
+
     setStartupOption(conf, startOpt);
-    return true;
+    return (args == null || i == args.length);    // Fail if more than one cmd specified!
   }
 
   private static void setStartupOption(Configuration conf, StartupOption opt) {
@@ -1914,8 +1939,9 @@ public class DataNode extends Configured
   }
 
   static StartupOption getStartupOption(Configuration conf) {
-    return StartupOption.valueOf(conf.get(DFS_DATANODE_STARTUP_KEY,
-                                          StartupOption.REGULAR.toString()));
+    String value = conf.get(DFS_DATANODE_STARTUP_KEY,
+                            StartupOption.REGULAR.toString());
+    return StartupOption.getEnum(value);
   }
 
   /**
@@ -1934,7 +1960,8 @@ public class DataNode extends Configured
    * 
    * @return the fsdataset that stores the blocks
    */
-  FsDatasetSpi<?> getFSDataset() {
+  @VisibleForTesting
+  public FsDatasetSpi<?> getFSDataset() {
     return data;
   }
 
@@ -1945,11 +1972,15 @@ public class DataNode extends Configured
 
 
   public static void secureMain(String args[], SecureResources resources) {
+    int errorCode = 0;
     try {
       StringUtils.startupShutdownMessage(DataNode.class, args, LOG);
       DataNode datanode = createDataNode(args, null, resources);
-      if (datanode != null)
+      if (datanode != null) {
         datanode.join();
+      } else {
+        errorCode = 1;
+      }
     } catch (Throwable e) {
       LOG.fatal("Exception in secureMain", e);
       terminate(1, e);
@@ -1959,7 +1990,7 @@ public class DataNode extends Configured
       // condition was not met. Also, In secure mode, control will go to Jsvc
       // and Datanode process hangs if it does not exit.
       LOG.warn("Exiting Datanode");
-      terminate(0);
+      terminate(errorCode);
     }
   }
   
@@ -2423,6 +2454,43 @@ public class DataNode extends Configured
     data.deleteBlockPool(blockPoolId, force);
   }
 
+  @Override // ClientDatanodeProtocol
+  public synchronized void shutdownDatanode(boolean forUpgrade) throws IOException {
+    LOG.info("shutdownDatanode command received (upgrade=" + forUpgrade +
+        "). Shutting down Datanode...");
+
+    // Shutdown can be called only once.
+    if (shutdownInProgress) {
+      throw new IOException("Shutdown already in progress.");
+    }
+    shutdownInProgress = true;
+    shutdownForUpgrade = forUpgrade;
+
+    // Asynchronously start the shutdown process so that the rpc response can be
+    // sent back.
+    Thread shutdownThread = new Thread() {
+      @Override public void run() {
+        if (!shutdownForUpgrade) {
+          // Delay the shutdown a bit if not doing for restart.
+          try {
+            Thread.sleep(1000);
+          } catch (InterruptedException ie) { }
+        }
+        shutdown();
+      }
+    };
+
+    shutdownThread.setDaemon(true);
+    shutdownThread.start();
+  }
+
+  @Override //ClientDatanodeProtocol
+  public DatanodeLocalInfo getDatanodeInfo() {
+    long uptime = ManagementFactory.getRuntimeMXBean().getUptime()/1000;
+    return new DatanodeLocalInfo(VersionInfo.getVersion(),
+        confVersion, uptime);
+  }
+
   /**
    * @param addr rpc address of the namenode
    * @return true if the datanode is connected to a NameNode at the
@@ -2446,6 +2514,10 @@ public class DataNode extends Configured
   public boolean isBPServiceAlive(String bpid) {
     BPOfferService bp = blockPoolManager.get(bpid);
     return bp != null ? bp.isAlive() : false;
+  }
+
+  boolean isRestarting() {
+    return shutdownForUpgrade;
   }
 
   /**
@@ -2476,7 +2548,7 @@ public class DataNode extends Configured
   /**
    * Get current value of the max balancer bandwidth in bytes per second.
    *
-   * @return bandwidth Blanacer bandwidth in bytes per second for this datanode.
+   * @return Balancer bandwidth in bytes per second for this datanode.
    */
   public Long getBalancerBandwidth() {
     DataXceiverServer dxcs =
@@ -2494,5 +2566,14 @@ public class DataNode extends Configured
 
   boolean shouldRun() {
     return shouldRun;
+  }
+
+  @VisibleForTesting
+  DataStorage getStorage() {
+    return storage;
+  }
+
+  public ShortCircuitRegistry getShortCircuitRegistry() {
+    return shortCircuitRegistry;
   }
 }

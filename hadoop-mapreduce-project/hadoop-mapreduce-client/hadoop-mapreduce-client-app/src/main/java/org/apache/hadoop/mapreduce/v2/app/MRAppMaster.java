@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.io.IOUtils;
@@ -45,6 +46,7 @@ import org.apache.hadoop.mapred.FileOutputCommitter;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.LocalContainerLauncher;
 import org.apache.hadoop.mapred.TaskAttemptListenerImpl;
+import org.apache.hadoop.mapred.TaskLog;
 import org.apache.hadoop.mapred.TaskUmbilicalProtocol;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.OutputCommitter;
@@ -119,6 +121,7 @@ import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.service.ServiceOperations;
+import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.StringInterner;
@@ -212,6 +215,7 @@ public class MRAppMaster extends CompositeService {
   boolean errorHappenedShutDown = false;
   private String shutDownMessage = null;
   JobStateInternal forcedState = null;
+  private final ScheduledExecutorService logSyncer;
 
   private long recoveredJobStartTime = 0;
 
@@ -240,6 +244,7 @@ public class MRAppMaster extends CompositeService {
     this.nmHttpPort = nmHttpPort;
     this.metrics = MRAppMetrics.create();
     this.maxAppAttempts = maxAppAttempts;
+    logSyncer = TaskLog.createLogSyncer();
     LOG.info("Created MRAppMaster for application " + applicationAttemptId);
   }
 
@@ -1078,6 +1083,12 @@ LOG.info("Creating Job");
     // All components have started, start the job.
     startJobs();
   }
+  
+  @Override
+  public void stop() {
+    super.stop();
+    TaskLog.syncLogsShutdown(logSyncer);
+  }
 
   private void processRecovery() {
     if (appAttemptID.getAttemptId() == 1) {
@@ -1371,12 +1382,7 @@ LOG.info("Creating Job");
       JobConf conf = new JobConf(new YarnConfiguration());
       conf.addResource(new Path(MRJobConfig.JOB_CONF_FILE));
       
-      // Explicitly disabling SSL for map reduce task as we can't allow MR users
-      // to gain access to keystore file for opening SSL listener. We can trust
-      // RM/NM to issue SSL certificates but definitely not MR-AM as it is
-      // running in user-land.
       MRWebAppUtil.initialize(conf);
-      HttpConfig.setPolicy(HttpConfig.Policy.HTTP_ONLY);
       // log the system properties
       String systemPropsToLog = MRApps.getSystemPropertiesToLog(conf);
       if (systemPropsToLog != null) {
@@ -1395,9 +1401,7 @@ LOG.info("Creating Job");
       initAndStartAppMaster(appMaster, conf, jobUserName);
     } catch (Throwable t) {
       LOG.fatal("Error starting MRAppMaster", t);
-      System.exit(1);
-    } finally {
-      LogManager.shutdown();
+      ExitUtil.terminate(1, t);
     }
   }
 
@@ -1472,5 +1476,15 @@ LOG.info("Creating Job");
         return null;
       }
     });
+  }
+
+  @Override
+  protected void serviceStop() throws Exception {
+    super.serviceStop();
+    LogManager.shutdown();
+  }
+
+  public ClientService getClientService() {
+    return clientService;
   }
 }

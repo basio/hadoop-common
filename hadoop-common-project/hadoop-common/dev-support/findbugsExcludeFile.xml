@@ -301,6 +301,10 @@
       <!-- protobuf generated code -->
       <Class name="~org\.apache\.hadoop\.ipc\.protobuf\.TestProtos.*"/>
     </Match>
+    <Match>
+      <!-- protobuf generated code -->
+      <Class name="~org\.apache\.hadoop\.ipc\.proto\.RefreshCallQueueProtocolProtos.*"/>
+    </Match>
 
     <!--
        Manually checked, misses child thread manually syncing on parent's intrinsic lock.
@@ -363,5 +367,12 @@
       <Method name="uploadFilePartAttempt"/>
       <Bug pattern="OBL_UNSATISFIED_OBLIGATION"/>
     </Match>
+
+     <!-- code from maven source, null value is checked at callee side. -->
+     <Match>
+       <Class name="org.apache.hadoop.util.ComparableVersion$ListItem" />
+       <Method name="compareTo" />
+       <Bug code="NP" />
+     </Match>
 
 </FindBugsFilter>

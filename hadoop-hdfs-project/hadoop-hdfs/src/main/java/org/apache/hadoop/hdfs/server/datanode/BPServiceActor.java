@@ -22,11 +22,9 @@ import static org.apache.hadoop.util.Time.now;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
+import com.google.common.base.Joiner;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
@@ -35,8 +33,8 @@ import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
 import org.apache.hadoop.hdfs.protocol.UnregisteredNodeException;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
@@ -103,7 +101,10 @@ class BPServiceActor implements Runnable {
   private final Map<String, PerStoragePendingIncrementalBR>
       pendingIncrementalBRperStorage = Maps.newHashMap();
 
-  private volatile int pendingReceivedRequests = 0;
+  // IBR = Incremental Block Report. If this flag is set then an IBR will be
+  // sent immediately by the actor thread without waiting for the IBR timer
+  // to elapse.
+  private volatile boolean sendImmediateIBR = false;
   private volatile boolean shouldServiceRun = true;
   private final DataNode dn;
   private final DNConf dnConf;
@@ -203,14 +204,6 @@ class BPServiceActor implements Runnable {
           "DataNode version '" + dnVersion + "' but is within acceptable " +
           "limits. Note: This is normal during a rolling upgrade.");
     }
-
-    if (HdfsConstants.LAYOUT_VERSION != nsInfo.getLayoutVersion()) {
-      LOG.warn("DataNode and NameNode layout versions must be the same." +
-        " Expected: "+ HdfsConstants.LAYOUT_VERSION +
-        " actual "+ nsInfo.getLayoutVersion());
-      throw new IncorrectVersionException(
-          nsInfo.getLayoutVersion(), "namenode");
-    }
   }
 
   private void connectToNNAndHandshake() throws IOException {
@@ -285,12 +278,10 @@ class BPServiceActor implements Runnable {
         if (perStorageMap.getBlockInfoCount() > 0) {
           // Send newly-received and deleted blockids to namenode
           ReceivedDeletedBlockInfo[] rdbi = perStorageMap.dequeueBlockInfos();
-          pendingReceivedRequests =
-              (pendingReceivedRequests > rdbi.length ?
-                  (pendingReceivedRequests - rdbi.length) : 0);
           reports.add(new StorageReceivedDeletedBlocks(storageUuid, rdbi));
         }
       }
+      sendImmediateIBR = false;
     }
 
     if (reports.size() == 0) {
@@ -314,8 +305,8 @@ class BPServiceActor implements Runnable {
             // didn't put something newer in the meantime.
             PerStoragePendingIncrementalBR perStorageMap =
                 pendingIncrementalBRperStorage.get(report.getStorageID());
-            pendingReceivedRequests +=
-                perStorageMap.putMissingBlockInfos(report.getBlocks());
+            perStorageMap.putMissingBlockInfos(report.getBlocks());
+            sendImmediateIBR = true;
           }
         }
       }
@@ -373,7 +364,7 @@ class BPServiceActor implements Runnable {
       ReceivedDeletedBlockInfo bInfo, String storageUuid) {
     synchronized (pendingIncrementalBRperStorage) {
       addPendingReplicationBlockInfo(bInfo, storageUuid);
-      pendingReceivedRequests++;
+      sendImmediateIBR = true;
       pendingIncrementalBRperStorage.notifyAll();
     }
   }
@@ -435,77 +426,107 @@ class BPServiceActor implements Runnable {
     }
   }
 
+  @VisibleForTesting
+  boolean hasPendingIBR() {
+    return sendImmediateIBR;
+  }
+
   /**
    * Report the list blocks to the Namenode
+   * @return DatanodeCommands returned by the NN. May be null.
    * @throws IOException
    */
-  DatanodeCommand blockReport() throws IOException {
+  List<DatanodeCommand> blockReport() throws IOException {
     // send block report if timer has expired.
-    DatanodeCommand cmd = null;
-    long startTime = now();
-    if (startTime - lastBlockReport > dnConf.blockReportInterval) {
-
-      // Flush any block information that precedes the block report. Otherwise
-      // we have a chance that we will miss the delHint information
-      // or we will report an RBW replica after the BlockReport already reports
-      // a FINALIZED one.
-      reportReceivedDeletedBlocks();
-
-      // Send one block report per known storage.
-
-      // Create block report
-      long brCreateStartTime = now();
-      long totalBlockCount = 0;
-
-      Map<DatanodeStorage, BlockListAsLongs> perVolumeBlockLists =
-          dn.getFSDataset().getBlockReports(bpos.getBlockPoolId());
-
-      // Send block report
-      long brSendStartTime = now();
-      StorageBlockReport[] reports =
-          new StorageBlockReport[perVolumeBlockLists.size()];
-
-      int i = 0;
-      for(Map.Entry<DatanodeStorage, BlockListAsLongs> kvPair : perVolumeBlockLists.entrySet()) {
-        DatanodeStorage dnStorage = kvPair.getKey();
-        BlockListAsLongs blockList = kvPair.getValue();
-        totalBlockCount += blockList.getNumberOfBlocks();
-
-        reports[i++] =
-            new StorageBlockReport(
-              dnStorage, blockList.getBlockListAsLongs());
-      }
-
-      cmd = bpNamenode.blockReport(bpRegistration, bpos.getBlockPoolId(), reports);
-
-      // Log the block report processing stats from Datanode perspective
-      long brSendCost = now() - brSendStartTime;
-      long brCreateCost = brSendStartTime - brCreateStartTime;
-      dn.getMetrics().addBlockReport(brSendCost);
-      LOG.info("BlockReport of " + totalBlockCount
-          + " blocks took " + brCreateCost + " msec to generate and "
-          + brSendCost + " msecs for RPC and NN processing");
-
-      // If we have sent the first block report, then wait a random
-      // time before we start the periodic block reports.
-      if (resetBlockReportTime) {
-        lastBlockReport = startTime - DFSUtil.getRandom().nextInt((int)(dnConf.blockReportInterval));
-        resetBlockReportTime = false;
-      } else {
-        /* say the last block report was at 8:20:14. The current report
-         * should have started around 9:20:14 (default 1 hour interval).
-         * If current time is :
-         *   1) normal like 9:20:18, next report should be at 10:20:14
-         *   2) unexpected like 11:35:43, next report should be at 12:20:14
-         */
-        lastBlockReport += (now() - lastBlockReport) /
-        dnConf.blockReportInterval * dnConf.blockReportInterval;
-      }
-      LOG.info("sent block report, processed command:" + cmd);
+    final long startTime = now();
+    if (startTime - lastBlockReport <= dnConf.blockReportInterval) {
+      return null;
     }
-    return cmd;
+
+    ArrayList<DatanodeCommand> cmds = new ArrayList<DatanodeCommand>();
+
+    // Flush any block information that precedes the block report. Otherwise
+    // we have a chance that we will miss the delHint information
+    // or we will report an RBW replica after the BlockReport already reports
+    // a FINALIZED one.
+    reportReceivedDeletedBlocks();
+    lastDeletedReport = startTime;
+
+    long brCreateStartTime = now();
+    Map<DatanodeStorage, BlockListAsLongs> perVolumeBlockLists =
+        dn.getFSDataset().getBlockReports(bpos.getBlockPoolId());
+
+    // Convert the reports to the format expected by the NN.
+    int i = 0;
+    int totalBlockCount = 0;
+    StorageBlockReport reports[] =
+        new StorageBlockReport[perVolumeBlockLists.size()];
+
+    for(Map.Entry<DatanodeStorage, BlockListAsLongs> kvPair : perVolumeBlockLists.entrySet()) {
+      BlockListAsLongs blockList = kvPair.getValue();
+      reports[i++] = new StorageBlockReport(
+          kvPair.getKey(), blockList.getBlockListAsLongs());
+      totalBlockCount += blockList.getNumberOfBlocks();
+    }
+
+    // Send the reports to the NN.
+    int numReportsSent;
+    long brSendStartTime = now();
+    if (totalBlockCount < dnConf.blockReportSplitThreshold) {
+      // Below split threshold, send all reports in a single message.
+      numReportsSent = 1;
+      DatanodeCommand cmd =
+          bpNamenode.blockReport(bpRegistration, bpos.getBlockPoolId(), reports);
+      if (cmd != null) {
+        cmds.add(cmd);
+      }
+    } else {
+      // Send one block report per message.
+      numReportsSent = i;
+      for (StorageBlockReport report : reports) {
+        StorageBlockReport singleReport[] = { report };
+        DatanodeCommand cmd = bpNamenode.blockReport(
+            bpRegistration, bpos.getBlockPoolId(), singleReport);
+        if (cmd != null) {
+          cmds.add(cmd);
+        }
+      }
+    }
+
+    // Log the block report processing stats from Datanode perspective
+    long brSendCost = now() - brSendStartTime;
+    long brCreateCost = brSendStartTime - brCreateStartTime;
+    dn.getMetrics().addBlockReport(brSendCost);
+    LOG.info("Sent " + numReportsSent + " blockreports " + totalBlockCount +
+        " blocks total. Took " + brCreateCost +
+        " msec to generate and " + brSendCost +
+        " msecs for RPC and NN processing. " +
+        " Got back commands " +
+            (cmds.size() == 0 ? "none" : Joiner.on("; ").join(cmds)));
+
+    scheduleNextBlockReport(startTime);
+    return cmds.size() == 0 ? null : cmds;
   }
-  
+
+  private void scheduleNextBlockReport(long previousReportStartTime) {
+    // If we have sent the first set of block reports, then wait a random
+    // time before we start the periodic block reports.
+    if (resetBlockReportTime) {
+      lastBlockReport = previousReportStartTime -
+          DFSUtil.getRandom().nextInt((int)(dnConf.blockReportInterval));
+      resetBlockReportTime = false;
+    } else {
+      /* say the last block report was at 8:20:14. The current report
+       * should have started around 9:20:14 (default 1 hour interval).
+       * If current time is :
+       *   1) normal like 9:20:18, next report should be at 10:20:14
+       *   2) unexpected like 11:35:43, next report should be at 12:20:14
+       */
+      lastBlockReport += (now() - lastBlockReport) /
+          dnConf.blockReportInterval * dnConf.blockReportInterval;
+    }
+  }
+
   DatanodeCommand cacheReport() throws IOException {
     // If caching is disabled, do not send a cache report
     if (dn.getFSDataset().getCacheCapacity() == 0) {
@@ -513,7 +534,7 @@ class BPServiceActor implements Runnable {
     }
     // send cache report if timer has expired.
     DatanodeCommand cmd = null;
-    long startTime = Time.monotonicNow();
+    final long startTime = Time.monotonicNow();
     if (startTime - lastCacheReport > dnConf.cacheReportInterval) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Sending cacheReport from service actor: " + this);
@@ -596,6 +617,20 @@ class BPServiceActor implements Runnable {
     bpos.shutdownActor(this);
   }
 
+  private void handleRollingUpgradeStatus(HeartbeatResponse resp) {
+    RollingUpgradeStatus rollingUpgradeStatus = resp.getRollingUpdateStatus();
+    if (rollingUpgradeStatus != null &&
+        rollingUpgradeStatus.getBlockPoolId().compareTo(bpos.getBlockPoolId()) != 0) {
+      // Can this ever occur?
+      LOG.error("Invalid BlockPoolId " +
+          rollingUpgradeStatus.getBlockPoolId() +
+          " in HeartbeatResponse. Expected " +
+          bpos.getBlockPoolId());
+    } else {
+      bpos.signalRollingUpgrade(rollingUpgradeStatus != null);
+    }
+  }
+
   /**
    * Main loop for each BP thread. Run until shutdown,
    * forever calling remote NameNode functions.
@@ -613,7 +648,7 @@ class BPServiceActor implements Runnable {
     //
     while (shouldRun()) {
       try {
-        long startTime = now();
+        final long startTime = now();
 
         //
         // Every so often, send heartbeat or block-report
@@ -642,6 +677,10 @@ class BPServiceActor implements Runnable {
                 this, resp.getNameNodeHaState());
             state = resp.getNameNodeHaState().getState();
 
+            if (state == HAServiceState.ACTIVE) {
+              handleRollingUpgradeStatus(resp);
+            }
+
             long startProcessCommands = now();
             if (!processCommand(resp.getCommands()))
               continue;
@@ -653,16 +692,16 @@ class BPServiceActor implements Runnable {
             }
           }
         }
-        if (pendingReceivedRequests > 0
-            || (startTime - lastDeletedReport > dnConf.deleteReportInterval)) {
+        if (sendImmediateIBR ||
+            (startTime - lastDeletedReport > dnConf.deleteReportInterval)) {
           reportReceivedDeletedBlocks();
           lastDeletedReport = startTime;
         }
 
-        DatanodeCommand cmd = blockReport();
-        processCommand(new DatanodeCommand[]{ cmd });
+        List<DatanodeCommand> cmds = blockReport();
+        processCommand(cmds == null ? null : cmds.toArray(new DatanodeCommand[cmds.size()]));
 
-        cmd = cacheReport();
+        DatanodeCommand cmd = cacheReport();
         processCommand(new DatanodeCommand[]{ cmd });
 
         // Now safe to start scanning the block pool.
@@ -678,7 +717,7 @@ class BPServiceActor implements Runnable {
         long waitTime = dnConf.heartBeatInterval - 
         (Time.now() - lastHeartbeat);
         synchronized(pendingIncrementalBRperStorage) {
-          if (waitTime > 0 && pendingReceivedRequests == 0) {
+          if (waitTime > 0 && !sendImmediateIBR) {
             try {
               pendingIncrementalBRperStorage.wait(waitTime);
             } catch (InterruptedException ie) {

@@ -6,9 +6,6 @@ Trunk - Unreleased
 
   NEW FEATURES
 
-    YARN-1496. Protocol additions to allow moving apps between queues (Sandy
-    Ryza)
-
   IMPROVEMENTS
 
   OPTIMIZATIONS
@@ -18,7 +15,412 @@ Trunk - Unreleased
     YARN-524 TestYarnVersionInfo failing if generated properties doesn't
     include an SVN URL. (stevel)
 
+Release 2.5.0 - UNRELEASED
+
+  INCOMPATIBLE CHANGES
+
+  NEW FEATURES
+
+  IMPROVEMENTS
+    YARN-1479. Invalid NaN values in Hadoop REST API JSON response (Chen He via
+    jeagles)
+
+    YARN-1736. FS: AppSchedulable.assignContainer's priority argument is 
+    redundant. (Naren Koneru via kasha)
+
+    YARN-1678. Fair scheduler gabs incessantly about reservations (Sandy Ryza)
+
+    YARN-1561. Fix a generic type warning in FairScheduler. (Chen He via junping_du)
+
+    YARN-1429. *nix: Allow a way for users to augment classpath of YARN daemons.
+    (Jarek Jarcec Cecho via kasha)
+
+  OPTIMIZATIONS
+
+  BUG FIXES 
+
+    YARN-1718. Fix a couple isTerminals in Fair Scheduler queue placement rules
+    (Sandy Ryza)
+
 Release 2.4.0 - UNRELEASED
+
+  INCOMPATIBLE CHANGES
+
+  NEW FEATURES
+
+    YARN-930. Bootstrapping ApplicationHistoryService module. (vinodkv)
+  
+    YARN-947. Implementing the data objects to be used by the History reader
+    and writer interfaces. (Zhijie Shen via vinodkv)
+  
+    YARN-934. Defined a Writer Interface for HistoryStorage. (Zhijie Shen via
+    vinodkv)
+  
+    YARN-925. Defined a Reader Interface for HistoryStorage. (Mayank Bansal via
+    vinodkv)
+  
+    YARN-978. Created ApplicationAttemptReport. (Mayank Bansal via vinodkv)
+  
+    YARN-956. Added a testable in-memory HistoryStorage. (Mayank Bansal via
+    vinodkv)
+  
+    YARN-975. Added a file-system implementation for HistoryStorage. (Zhijie Shen
+    via vinodkv)
+  
+    YARN-1123. Added a new ContainerReport and its Protobuf implementation. (Mayank
+    Bansal via vinodkv)
+  
+    YARN-979. Added more APIs for getting information about ApplicationAttempts
+    and Containers from ApplicationHistoryProtocol. (Mayank Bansal and Zhijie Shen
+    via vinodkv)
+  
+    YARN-953. Changed ResourceManager to start writing history data. (Zhijie Shen
+    via vinodkv)
+  
+    YARN-1266. Implemented PB service and client wrappers for
+    ApplicationHistoryProtocol. (Mayank Bansal via vinodkv)
+  
+    YARN-955. Implemented ApplicationHistoryProtocol handler. (Mayank Bansal via
+    vinodkv)
+  
+    YARN-1242. Changed yarn scripts to be able to start ApplicationHistoryServer
+    as an individual process. (Mayank Bansal via vinodkv)
+  
+    YARN-954. Implemented web UI for the ApplicationHistoryServer and wired it into
+    the HistoryStorage. (Zhijie Shen via vinodkv)
+  
+    YARN-967. Added the client and CLI interfaces for obtaining ApplicationHistory
+    data. (Mayank Bansal via vinodkv)
+  
+    YARN-1023. Added Webservices REST APIs support for Application History. (Zhijie
+    Shen via vinodkv)
+  
+    YARN-1413. Implemented serving of aggregated-logs in the ApplicationHistory
+    server. (Mayank Bansal via vinodkv)
+
+    YARN-1633. Defined user-facing entity, entity-info and event objects related
+    to Application Timeline feature. (Zhijie Shen via vinodkv)
+
+    YARN-1611. Introduced the concept of a configuration provider which can be
+    used by ResourceManager to read configuration locally or from remote systems
+    so as to help RM failover. (Xuan Gong via vinodkv)
+
+    YARN-1659. Defined the ApplicationTimelineStore store as an abstraction for
+    implementing different storage impls for storing timeline information.
+    (Billie Rinaldi via vinodkv)
+
+    YARN-1634. Added a testable in-memory implementation of
+    ApplicationTimelineStore. (Zhijie Shen via vinodkv)
+
+    YARN-1461. Added tags for YARN applications and changed RM to handle them.
+    (Karthik Kambatla via zjshen)
+
+    YARN-1636. Augmented Application-history server's web-services to also expose
+    new APIs for retrieving and storing timeline information. (Zhijie Shen via
+    vinodkv)
+
+    YARN-1490. Introduced the ability to make ResourceManager optionally not kill
+    all containers when an ApplicationMaster exits. (Jian He via vinodkv)
+
+    YARN-1041. Added the ApplicationMasterProtocol API for applications to use the
+    ability in ResourceManager to optionally not kill containers when the
+    ApplicationMaster exits. (Jian He via vinodkv)
+
+    YARN-1566. Changed Distributed Shell to retain containers across application
+    attempts. (Jian He via vinodkv)
+
+    YARN-1635. Implemented a Leveldb based ApplicationTimelineStore. (Billie
+    Rinaldi via zjshen)
+
+    YARN-1637. Implemented a client library for Java users to post timeline
+    entities and events. (zjshen)
+    
+    YARN-1496. Protocol additions to allow moving apps between queues (Sandy
+    Ryza)
+
+    YARN-1498. Common scheduler changes for moving apps between queues (Sandy
+    Ryza)
+
+    YARN-1504. RM changes for moving apps between queues (Sandy Ryza)
+
+    YARN-1499. Fair Scheduler changes for moving apps between queues (Sandy
+    Ryza)
+
+    YARN-1497. Command line additions for moving apps between queues (Sandy
+    Ryza)
+
+    YARN-1588. Enhanced RM and the scheduling protocol to also send NMTokens of
+    transferred containers from previous app-attempts to new AMs after YARN-1490.
+    (Jian He via vinodkv)
+
+  IMPROVEMENTS
+
+    YARN-1007. Enhance History Reader interface for Containers. (Mayank Bansal via
+    devaraj)
+  
+    YARN-974. Added more information to RMContainer to be collected and recorded in
+    Application-History. (Zhijie Shen via vinodkv)
+  
+    YARN-987. Added ApplicationHistoryManager responsible for exposing reports to
+    all clients. (Mayank Bansal via vinodkv)
+
+    YARN-1630. Introduce timeout for async polling operations in YarnClientImpl
+    (Aditya Acharya via Sandy Ryza)
+
+    YARN-1617. Remove ancient comment and surround LOG.debug in
+    AppSchedulingInfo.allocate (Sandy Ryza)
+
+    YARN-1639. Modified RM HA configuration handling to have a way of not
+    requiring separate configuration files for each RM. (Xuan Gong via vinodkv)
+
+    YARN-1668. Modified RM HA handling of admin-acls to be available across RM
+    failover by making using of a remote configuration-provider. (Xuan Gong via
+    vinodkv)
+
+    YARN-1667. Modified RM HA handling of super users (with proxying ability) to
+    be available across RM failover by making using of a remote
+    configuration-provider. (Xuan Gong via vinodkv)
+
+    YARN-1285. Changed the default value of yarn.acl.enable in yarn-default.xml
+    to be consistent with what exists (false) in the code and documentation.
+    (Kenji Kikushima via vinodkv)
+
+    YARN-1669. Modified RM HA handling of protocol level service-ACLS to
+    be available across RM failover by making using of a remote
+    configuration-provider. (Xuan Gong via vinodkv)
+
+    YARN-1665. Simplify the configuration of RM HA by having better default
+    values. (Xuan Gong via vinodkv)
+
+    YARN-1660. Simplified the RM HA configuration to accept and be able to simply
+    depend just on configuration properties of the form
+    yarn.resourcemanager.hostname.RMID and use the default ports for all service
+    addresses. (Xuan Gong via vinodkv)
+
+    YARN-1493. Changed ResourceManager and Scheduler interfacing to recognize
+    app-attempts separately from apps. (Jian He via vinodkv)
+
+    YARN-1459. Changed ResourceManager to depend its service initialization
+    on the configuration-provider mechanism during startup too. (Xuan Gong via
+    vinodkv)
+
+    YARN-1706. Created an utility method to dump timeline records to JSON
+    strings. (zjshen)
+
+    YARN-1641. ZK store should attempt a write periodically to ensure it is 
+    still Active. (kasha)
+
+    YARN-1531. True up yarn command documentation (Akira Ajisaka via kasha)
+
+    YARN-1345. Remove FINAL_SAVING state from YarnApplicationAttemptState
+    (Zhijie Shen via jianhe)
+
+    YARN-1676. Modified RM HA handling of user-to-group mappings to
+    be available across RM failover by making using of a remote
+    configuration-provider. (Xuan Gong via vinodkv)
+
+    YARN-1666. Modified RM HA handling of include/exclude node-lists to be
+    available across RM failover by making using of a remote
+    configuration-provider. (Xuan Gong via vinodkv)
+
+    YARN-1171. Add default queue properties to Fair Scheduler documentation
+    (Naren Koneru via Sandy Ryza)
+
+    YARN-1470. Add audience annotations to MiniYARNCluster. (Anubhav Dhoot
+    via kasha)
+
+    YARN-1732. Changed types of related-entities and primary-filters in the
+    timeline-service to be sets instead of maps. (Billie Rinaldi via vinodkv)
+
+    YARN-1687. Renamed user-facing records for the timeline-service to be simply
+    named after 'timeline' instead of 'apptimeline'. (Zhijie Shen via vinodkv)
+
+    YARN-1749. Updated application-history related configs to reflect the latest
+    reality and to be consistently named. (Zhijie Shen via vinodkv)
+
+    YARN-1301. Added the INFO level log of the non-empty blacklist additions
+    and removals inside ApplicationMasterService. (Tsuyoshi Ozawa via zjshen)
+
+    YARN-1528. Allow setting auth for ZK connections. (kasha)
+
+    YARN-1704. Modified LICENSE and NOTICE files to reflect newly used levelDB
+    related libraries. (Billie Rinaldi via vinodkv)
+
+    YARN-1765. Added test cases to verify that killApplication API works across
+    ResourceManager failover. (Xuan Gong via vinodkv) 
+
+    YARN-1730. Implemented simple write-locking in the LevelDB based timeline-
+    store. (Billie Rinaldi via vinodkv)
+
+    YARN-986. Changed client side to be able to figure out the right RM Delegation
+    token for the right ResourceManager when HA is enabled. (Karthik Kambatla via
+    vinodkv)
+
+    YARN-1785. FairScheduler treats app lookup failures as ERRORs. 
+    (bc Wong via kasha)
+
+    YARN-1752. Fixed ApplicationMasterService to reject unregister request if
+    AM did not register before. (Rohith Sharma via jianhe)
+
+    YARN-1761. Modified RMAdmin CLI to check whether HA is enabled or not before
+    it executes any of the HA admin related commands. (Xuan Gong via vinodkv)
+
+  OPTIMIZATIONS
+
+  BUG FIXES
+
+    YARN-935. Correcting pom.xml to build applicationhistoryserver module
+    successfully. (Zhijie Shen via vinodkv)
+  
+    YARN-962. Fixed bug in application-history proto file and renamed it be just
+    a client proto file. (Zhijie Shen via vinodkv)
+  
+    YARN-984. Renamed the incorrectly named applicationhistoryservice.records.pb.impl
+    package to be applicationhistoryservice.records.impl.pb. (Devaraj K via vinodkv)
+  
+    YARN-1534. Fixed failure of test TestAHSWebApp. (Shinichi Yamashita via vinodkv)
+  
+    YARN-1555. Fixed test failures in applicationhistoryservice.* (Vinod Kumar 
+    Vavilapalli via mayank)
+  
+    YARN-1594. Updated pom.xml of applicationhistoryservice sub-project according to
+    YARN-888. (Vinod Kumar Vavilapalli via zjshen)
+  
+    YARN-1596. Fixed Javadoc warnings on branch YARN-321. (Vinod Kumar Vavilapalli
+    via zjshen)
+  
+    YARN-1597. Fixed Findbugs warnings on branch YARN-321. (Vinod Kumar Vavilapalli
+    via zjshen)
+  
+    YARN-1595. Made enabling history service configurable and fixed test failures on
+    branch YARN-321. (Vinod Kumar Vavilapalli via zjshen)
+  
+    YARN-1605. Fixed formatting issues in the new module on branch YARN-321. (Vinod
+    Kumar Vavilapalli via zjshen)
+
+    YARN-1625. Fixed RAT warnings after YARN-321 merge. (Shinichi Yamashita via
+    vinodkv)
+
+    YARN-1613. Fixed the typo with the configuration name
+    YARN_HISTORY_SERVICE_ENABLED. (Akira Ajisaka via vinodkv)
+
+    YARN-1618. Fix invalid RMApp transition from NEW to FINAL_SAVING (kasha)
+
+    YARN-1600. RM does not startup when security is enabled without spnego
+    configured (Haohui Mai via jlowe)
+
+    YARN-1642. RMDTRenewer#getRMClient should use ClientRMProxy (kasha)
+
+    YARN-1632. TestApplicationMasterServices should be under
+    org.apache.hadoop.yarn.server.resourcemanager package (Chen He via jeagles)
+
+    YARN-1673. Fix option parsing in YARN's application CLI after it is broken
+    by YARN-967. (Mayank Bansal via vinodkv)
+
+    YARN-1684. Fixed history server heap size in yarn script. (Billie Rinaldi
+    via zjshen)
+
+    YARN-1166. Fixed app-specific and attempt-specific QueueMetrics to be
+    triggered by accordingly app event and attempt event. 
+
+    YARN-1689. Made RMAppAttempt get killed when RMApp is at ACCEPTED. (Vinod
+    Kumar Vavilapalli via zjshen)
+
+    YARN-1661. Fixed DS ApplicationMaster to write the correct exit log. (Vinod
+    Kumar Vavilapalli via zjshen)
+
+    YARN-1672. YarnConfiguration is missing a default for 
+    yarn.nodemanager.log.retain-seconds (Naren Koneru via kasha)
+
+    YARN-1698. Fixed default TimelineStore in code to match what is documented
+    in yarn-default.xml (Zhijie Shen via vinodkv)
+
+    YARN-1697. NodeManager reports negative running containers (Sandy Ryza)
+
+    YARN-1719. Fixed the root path related Jersey warnings produced in
+    ATSWebServices. (Billie Rinaldi via zjshen)
+
+    YARN-1692. ConcurrentModificationException in fair scheduler AppSchedulable
+    (Sangjin Lee via Sandy Ryza)
+
+    YARN-1578. Fixed reading incomplete application attempt and container data
+    in FileSystemApplicationHistoryStore. (Shinichi Yamashita via zjshen)
+
+    YARN-1417. Modified RM to generate container-tokens not at creation time, but
+    at allocation time so as to prevent RM from shelling out containers with
+    expired tokens. (Omkar Vinit Joshi and Jian He via vinodkv)
+
+    YARN-1553. Modified YARN and MR to stop using HttpConfig.isSecure() and
+    instead rely on the http policy framework. And also fix some bugs related
+    to https handling in YARN web-apps. (Haohui Mai via vinodkv)
+
+    YARN-1721. When moving app between queues in Fair Scheduler, grab lock on
+    FSSchedulerApp (Sandy Ryza)
+
+    YARN-1724. Race condition in Fair Scheduler when continuous scheduling is
+    turned on (Sandy Ryza)
+
+    YARN-1590. Fixed ResourceManager, web-app proxy and MR JobHistoryServer to
+    expand _HOST properly in their kerberos principles. (Mohammad Kamrul Islam
+    va vinodkv)
+
+    YARN-1428. Fixed RM to write the final state of RMApp/RMAppAttempt to the 
+    application history store in the transition to the final state. (Contributed
+    by Zhijie Shen)
+
+    YARN-713. Fixed ResourceManager to not crash while building tokens when DNS
+    issues happen transmittently. (Jian He via vinodkv)
+
+    YARN-1398. Fixed a deadlock in ResourceManager between users requesting
+    queue-acls and completing containers. (vinodkv)
+
+    YARN-1071. Enabled ResourceManager to recover cluster metrics
+    numDecommissionedNMs after restarting. (Jian He via zjshen)
+
+    YARN-1742. Fixed javadoc of configuration parameter
+    DEFAULT_NM_MIN_HEALTHY_DISKS_FRACTION. (Akira Ajisaka via vinodkv)
+
+    YARN-1686. Fixed NodeManager to properly handle any errors during
+    re-registration after a RESYNC and thus avoid hanging. (Rohith Sharma via
+    vinodkv)
+
+    YARN-1734. Fixed ResourceManager to update the configurations when it
+    transits from standby to active mode so as to assimilate any changes that
+    happened while it was in standby mode. (Xuan Gong via vinodkv)
+
+    YARN-1760. TestRMAdminService assumes CapacityScheduler. (kasha)
+
+    YARN-1758. Fixed ResourceManager to not mandate the presence of site specific
+    configuration files and thus fix failures in downstream tests. (Xuan Gong via
+    vinodkv)
+
+    YARN-1748. Excluded core-site.xml from hadoop-yarn-server-tests package's jar
+    and thus avoid breaking downstream tests. (Sravya Tirukkovalur via vinodkv)
+
+    YARN-1729. Made TimelineWebServices deserialize the string primary- and
+    secondary-filters param into the JSON-compatible object. (Billie Rinaldi via
+    zjshen)
+
+    YARN-1766. Fixed a bug in ResourceManager to use configuration loaded from the
+    configuration-provider when booting up. (Xuan Gong via vinodkv)
+
+    YARN-1768. Fixed error message being too verbose when killing a non-existent
+    application
+    
+
+Release 2.3.1 - UNRELEASED
+
+  INCOMPATIBLE CHANGES
+
+  NEW FEATURES
+
+  IMPROVEMENTS
+
+  OPTIMIZATIONS
+
+  BUG FIXES
+
+Release 2.3.0 - 2014-02-18
 
   INCOMPATIBLE CHANGES
 
@@ -61,19 +463,33 @@ Release 2.4.0 - UNRELEASED
     YARN-1029. Added embedded leader election in the ResourceManager. (Karthik
     Kambatla via vinodkv)
 
-    YARN-1490. Introduced the ability to make ResourceManager optionally not kill
-    all containers when an ApplicationMaster exits. (Jian He via vinodkv)
-
     YARN-1033. Expose RM active/standby state to Web UI and REST API (kasha)
 
-    YARN-1041. Added the ApplicationMasterProtocol API for applications to use the
-    ability in ResourceManager to optionally not kill containers when the
-    ApplicationMaster exits. (Jian He via vinodkv)
-
-    YARN-1566. Changed Distributed Shell to retain containers across application
-    attempts. (Jian He via vinodkv)
-
   IMPROVEMENTS
+
+    YARN-305. Fair scheduler logs too many "Node offered to app" messages.
+    (Lohit Vijayarenu via Sandy Ryza)
+
+    YARN-1258. Allow configuring the Fair Scheduler root queue (Sandy Ryza)
+
+    YARN-1288. Make Fair Scheduler ACLs more user friendly (Sandy Ryza)
+
+    YARN-1315. TestQueueACLs should also test FairScheduler (Sandy Ryza)
+
+    YARN-1335. Move duplicate code from FSSchedulerApp and FiCaSchedulerApp
+    into SchedulerApplication (Sandy Ryza)
+
+    YARN-1333. Support blacklisting in the Fair Scheduler (Tsuyoshi Ozawa via
+    Sandy Ryza)
+
+    YARN-1109. Demote NodeManager "Sending out status for container" logs to
+    debug (haosdent via Sandy Ryza)
+
+    YARN-1321. Changed NMTokenCache to support both singleton and an instance
+    usage. (Alejandro Abdelnur via vinodkv) 
+
+    YARN-1388. Fair Scheduler page always displays blank fair share (Liyin Liang
+    via Sandy Ryza)
 
     YARN-7. Support CPU resource for DistributedShell. (Junping Du via llu)
 
@@ -212,9 +628,6 @@ Release 2.4.0 - UNRELEASED
     YARN-1541. Changed ResourceManager to invalidate ApplicationMaster host/port
     information once an AM crashes. (Jian He via vinodkv)
 
-    YARN-1493. Changed ResourceManager and Scheduler interfacing to recognize
-    app-attempts separately from apps. (Jian He via vinodkv)
-
     YARN-1482. Modified WebApplicationProxy to make it work across ResourceManager
     fail-over. (Xuan Gong via vinodkv)
 
@@ -229,9 +642,76 @@ Release 2.4.0 - UNRELEASED
     YARN-1567. In Fair Scheduler, allow empty queues to change between leaf and
     parent on allocation file reload (Sandy Ryza)
 
+    YARN-1616. RMFatalEventDispatcher should log the cause of the event (kasha)
+
+    YARN-1624. QueuePlacementPolicy format is not easily readable via a JAXB
+    parser (Aditya Acharya via Sandy Ryza)
+
+    YARN-1623. Include queue name in RegisterApplicationMasterResponse (Sandy
+    Ryza)
+
+    YARN-1573. ZK store should use a private password for root-node-acls. 
+    (kasha).
+
   OPTIMIZATIONS
 
   BUG FIXES
+
+    YARN-1284. LCE: Race condition leaves dangling cgroups entries for killed
+    containers. (Alejandro Abdelnur via Sandy Ryza)
+
+    YARN-1283. Fixed RM to give a fully-qualified proxy URL for an application
+    so that clients don't need to do scheme-mangling. (Omkar Vinit Joshi via
+    vinodkv)
+
+    YARN-879. Fixed tests w.r.t o.a.h.y.server.resourcemanager.Application.
+    (Junping Du via devaraj)
+
+    YARN-1265. Fair Scheduler chokes on unhealthy node reconnect (Sandy Ryza)
+
+    YARN-1044. used/min/max resources do not display info in the scheduler page
+    (Sangjin Lee via Sandy Ryza)
+
+    YARN-1259. In Fair Scheduler web UI, queue num pending and num active apps
+    switched. (Robert Kanter via Sandy Ryza)
+
+    YARN-1295. In UnixLocalWrapperScriptBuilder, using bash -c can cause Text
+    file busy errors (Sandy Ryza)
+
+    YARN-1185. Fixed FileSystemRMStateStore to not leave partial files that
+    prevent subsequent ResourceManager recovery. (Omkar Vinit Joshi via vinodkv)
+
+    YARN-1331. yarn.cmd exits with NoClassDefFoundError trying to run rmadmin or
+    logs. (cnauroth)
+
+    YARN-1330. Fair Scheduler: defaultQueueSchedulingPolicy does not take effect
+    (Sandy Ryza)
+    
+    YARN-1022. Unnecessary INFO logs in AMRMClientAsync (haosdent via bikas)
+    
+    YARN-1349. yarn.cmd does not support passthrough to any arbitrary class.
+    (cnauroth)
+    
+    YARN-1357. TestContainerLaunch.testContainerEnvVariables fails on Windows.
+    (Chuan Liu via cnauroth)
+
+    YARN-1358. TestYarnCLI fails on Windows due to line endings. (Chuan Liu via
+    cnauroth)
+
+    YARN-1343. NodeManagers additions/restarts are not reported as node updates 
+    in AllocateResponse responses to AMs. (tucu)
+
+    YARN-1381. Same relaxLocality appears twice in exception message of
+    AMRMClientImpl#checkLocalityRelaxationConflict() (Ted Yu via Sandy Ryza)
+
+    YARN-1407. RM Web UI and REST APIs should uniformly use
+    YarnApplicationState (Sandy Ryza)
+
+    YARN-1438. Ensure container diagnostics includes exception from container
+    launch. (stevel via acmurthy)
+
+    YARN-1138. yarn.application.classpath is set to point to $HADOOP_CONF_DIR
+    etc., which does not work on Windows. (Chuan Liu via cnauroth)
 
     YARN-461. Fair scheduler should not accept apps with empty string queue name. 
     (ywskycn via tucu)
@@ -333,9 +813,6 @@ Release 2.4.0 - UNRELEASED
     YARN-1574. RMDispatcher should be reset on transition to standby. (Xuan Gong
     via kasha)
 
-    YARN-1166. Fixed app-specific and attempt-specific QueueMetrics to be
-    triggered by accordingly app event and attempt event. 
-
     YARN-1598. HA-related rmadmin commands don't work on a secure cluster (kasha)
 
     YARN-1603. Remove two *.orig files which were unexpectedly committed. 
@@ -352,97 +829,16 @@ Release 2.4.0 - UNRELEASED
     YARN-1606. Fix the default value of yarn.resourcemanager.zk-timeout-ms 
     in yarn-default.xml (kasha)
 
-Release 2.3.0 - UNRELEASED
+    YARN-1607. TestRM relies on the scheduler assigning multiple containers in
+    a single node update (Sandy Ryza)
 
-  INCOMPATIBLE CHANGES
+    YARN-1575. Public localizer crashes with "Localized unkown resource"
+    (jlowe)
 
-  NEW FEATURES
+    YARN-1629. IndexOutOfBoundsException in MaxRunningAppsEnforcer (Sandy Ryza)
 
-  IMPROVEMENTS
-
-    YARN-305. Fair scheduler logs too many "Node offered to app" messages.
-    (Lohit Vijayarenu via Sandy Ryza)
-
-    YARN-1258. Allow configuring the Fair Scheduler root queue (Sandy Ryza)
-
-    YARN-1288. Make Fair Scheduler ACLs more user friendly (Sandy Ryza)
-
-    YARN-1315. TestQueueACLs should also test FairScheduler (Sandy Ryza)
-
-    YARN-1335. Move duplicate code from FSSchedulerApp and FiCaSchedulerApp
-    into SchedulerApplication (Sandy Ryza)
-
-    YARN-1333. Support blacklisting in the Fair Scheduler (Tsuyoshi Ozawa via
-    Sandy Ryza)
-
-    YARN-1109. Demote NodeManager "Sending out status for container" logs to
-    debug (haosdent via Sandy Ryza)
-
-    YARN-1321. Changed NMTokenCache to support both singleton and an instance
-    usage. (Alejandro Abdelnur via vinodkv) 
-
-    YARN-1388. Fair Scheduler page always displays blank fair share (Liyin Liang
-    via Sandy Ryza)
-
-  OPTIMIZATIONS
-
-  BUG FIXES
-
-    YARN-1284. LCE: Race condition leaves dangling cgroups entries for killed
-    containers. (Alejandro Abdelnur via Sandy Ryza)
-
-    YARN-1283. Fixed RM to give a fully-qualified proxy URL for an application
-    so that clients don't need to do scheme-mangling. (Omkar Vinit Joshi via
-    vinodkv)
-
-    YARN-879. Fixed tests w.r.t o.a.h.y.server.resourcemanager.Application.
-    (Junping Du via devaraj)
-
-    YARN-1265. Fair Scheduler chokes on unhealthy node reconnect (Sandy Ryza)
-
-    YARN-1044. used/min/max resources do not display info in the scheduler page
-    (Sangjin Lee via Sandy Ryza)
-
-    YARN-1259. In Fair Scheduler web UI, queue num pending and num active apps
-    switched. (Robert Kanter via Sandy Ryza)
-
-    YARN-1295. In UnixLocalWrapperScriptBuilder, using bash -c can cause Text
-    file busy errors (Sandy Ryza)
-
-    YARN-1185. Fixed FileSystemRMStateStore to not leave partial files that
-    prevent subsequent ResourceManager recovery. (Omkar Vinit Joshi via vinodkv)
-
-    YARN-1331. yarn.cmd exits with NoClassDefFoundError trying to run rmadmin or
-    logs. (cnauroth)
-
-    YARN-1330. Fair Scheduler: defaultQueueSchedulingPolicy does not take effect
-    (Sandy Ryza)
-    
-    YARN-1022. Unnecessary INFO logs in AMRMClientAsync (haosdent via bikas)
-    
-    YARN-1349. yarn.cmd does not support passthrough to any arbitrary class.
-    (cnauroth)
-    
-    YARN-1357. TestContainerLaunch.testContainerEnvVariables fails on Windows.
-    (Chuan Liu via cnauroth)
-
-    YARN-1358. TestYarnCLI fails on Windows due to line endings. (Chuan Liu via
-    cnauroth)
-
-    YARN-1343. NodeManagers additions/restarts are not reported as node updates 
-    in AllocateResponse responses to AMs. (tucu)
-
-    YARN-1381. Same relaxLocality appears twice in exception message of
-    AMRMClientImpl#checkLocalityRelaxationConflict() (Ted Yu via Sandy Ryza)
-
-    YARN-1407. RM Web UI and REST APIs should uniformly use
-    YarnApplicationState (Sandy Ryza)
-
-    YARN-1438. Ensure container diagnostics includes exception from container
-    launch. (stevel via acmurthy)
-
-    YARN-1138. yarn.application.classpath is set to point to $HADOOP_CONF_DIR
-    etc., which does not work on Windows. (Chuan Liu via cnauroth)
+    YARN-1628. Fixed the test failure in TestContainerManagerSecurity. (Vinod
+    Kumar Vavilapalli via zjshen)
 
 Release 2.2.0 - 2013-10-13
 

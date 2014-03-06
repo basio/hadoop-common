@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -33,6 +34,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.NMToken;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -57,7 +59,7 @@ import com.google.common.collect.Multiset;
  */
 @Private
 @Unstable
-public abstract class SchedulerApplicationAttempt {
+public class SchedulerApplicationAttempt {
   
   private static final Log LOG = LogFactory
     .getLog(SchedulerApplicationAttempt.class);
@@ -91,7 +93,7 @@ public abstract class SchedulerApplicationAttempt {
   protected Map<Priority, Long> lastScheduledContainer =
       new HashMap<Priority, Long>();
 
-  protected final Queue queue;
+  protected Queue queue;
   protected boolean isStopped = false;
   
   protected final RMContext rmContext;
@@ -150,7 +152,7 @@ public abstract class SchedulerApplicationAttempt {
     return appSchedulingInfo.getPriorities();
   }
   
-  public ResourceRequest getResourceRequest(Priority priority, String resourceName) {
+  public synchronized ResourceRequest getResourceRequest(Priority priority, String resourceName) {
     return this.appSchedulingInfo.getResourceRequest(priority, resourceName);
   }
 
@@ -158,7 +160,7 @@ public abstract class SchedulerApplicationAttempt {
     return getResourceRequest(priority, ResourceRequest.ANY).getNumContainers();
   }
 
-  public Resource getResource(Priority priority) {
+  public synchronized Resource getResource(Priority priority) {
     return appSchedulingInfo.getResource(priority);
   }
 
@@ -233,8 +235,7 @@ public abstract class SchedulerApplicationAttempt {
     if (rmContainer == null) {
       rmContainer = 
           new RMContainerImpl(container, getApplicationAttemptId(), 
-              node.getNodeID(), rmContext.getDispatcher().getEventHandler(), 
-              rmContext.getContainerAllocationExpirer());
+              node.getNodeID(), appSchedulingInfo.getUser(), rmContext);
         
       Resources.addTo(currentReservation, container.getResource());
       
@@ -340,16 +341,60 @@ public abstract class SchedulerApplicationAttempt {
     return currentConsumption;
   }
 
-  public synchronized List<Container> pullNewlyAllocatedContainers() {
-    List<Container> returnContainerList = new ArrayList<Container>(
-        newlyAllocatedContainers.size());
-    for (RMContainer rmContainer : newlyAllocatedContainers) {
-      rmContainer.handle(new RMContainerEvent(rmContainer.getContainerId(),
-          RMContainerEventType.ACQUIRED));
-      returnContainerList.add(rmContainer.getContainer());
+  public static class ContainersAndNMTokensAllocation {
+    List<Container> containerList;
+    List<NMToken> nmTokenList;
+
+    public ContainersAndNMTokensAllocation(List<Container> containerList,
+        List<NMToken> nmTokenList) {
+      this.containerList = containerList;
+      this.nmTokenList = nmTokenList;
     }
-    newlyAllocatedContainers.clear();
-    return returnContainerList;
+
+    public List<Container> getContainerList() {
+      return containerList;
+    }
+
+    public List<NMToken> getNMTokenList() {
+      return nmTokenList;
+    }
+  }
+
+  // Create container token and NMToken altogether, if either of them fails for
+  // some reason like DNS unavailable, do not return this container and keep it
+  // in the newlyAllocatedContainers waiting to be refetched.
+  public synchronized ContainersAndNMTokensAllocation
+      pullNewlyAllocatedContainersAndNMTokens() {
+    List<Container> returnContainerList =
+        new ArrayList<Container>(newlyAllocatedContainers.size());
+    List<NMToken> nmTokens = new ArrayList<NMToken>();
+    for (Iterator<RMContainer> i = newlyAllocatedContainers.iterator(); i
+      .hasNext();) {
+      RMContainer rmContainer = i.next();
+      Container container = rmContainer.getContainer();
+      try {
+        // create container token and NMToken altogether.
+        container.setContainerToken(rmContext.getContainerTokenSecretManager()
+          .createContainerToken(container.getId(), container.getNodeId(),
+            getUser(), container.getResource()));
+        NMToken nmToken =
+            rmContext.getNMTokenSecretManager().createAndGetNMToken(getUser(),
+              getApplicationAttemptId(), container);
+        if (nmToken != null) {
+          nmTokens.add(nmToken);
+        }
+      } catch (IllegalArgumentException e) {
+        // DNS might be down, skip returning this container.
+        LOG.error("Error trying to assign container token and NM token to" +
+            " an allocated container " + container.getId(), e);
+        continue;
+      }
+      returnContainerList.add(container);
+      i.remove();
+      rmContainer.handle(new RMContainerEvent(rmContainer.getContainerId(),
+        RMContainerEventType.ACQUIRED));
+    }
+    return new ContainersAndNMTokensAllocation(returnContainerList, nmTokens);
   }
 
   public synchronized void updateBlacklist(
@@ -432,4 +477,25 @@ public abstract class SchedulerApplicationAttempt {
     this.appSchedulingInfo
       .transferStateFromPreviousAppSchedulingInfo(appAttempt.appSchedulingInfo);
   }
+  
+  public synchronized void move(Queue newQueue) {
+    QueueMetrics oldMetrics = queue.getMetrics();
+    QueueMetrics newMetrics = newQueue.getMetrics();
+    String user = getUser();
+    for (RMContainer liveContainer : liveContainers.values()) {
+      Resource resource = liveContainer.getContainer().getResource();
+      oldMetrics.releaseResources(user, 1, resource);
+      newMetrics.allocateResources(user, 1, resource, false);
+    }
+    for (Map<NodeId, RMContainer> map : reservedContainers.values()) {
+      for (RMContainer reservedContainer : map.values()) {
+        Resource resource = reservedContainer.getReservedResource();
+        oldMetrics.unreserveResource(user, resource);
+        newMetrics.reserveResource(user, resource);
+      }
+    }
+
+    appSchedulingInfo.move(newQueue);
+    this.queue = newQueue;
+  }  
 }

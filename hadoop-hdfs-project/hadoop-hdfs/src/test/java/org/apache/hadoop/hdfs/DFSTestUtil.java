@@ -20,6 +20,10 @@ package org.apache.hadoop.hdfs;
 
 import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
+import com.google.common.base.Supplier;
+import com.google.common.collect.Lists;
+
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -27,7 +31,7 @@ import org.apache.hadoop.fs.*;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.Options.Rename;
-import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.MiniDFSCluster.NameNodeInfo;
 import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
@@ -41,19 +45,23 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.TestTransferRbw;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.ShellBasedUnixGroupsMapping;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.VersionInfo;
 
 import java.io.*;
@@ -184,10 +192,26 @@ public class DFSTestUtil {
     }
   }
 
-  public static String readFile(FileSystem fs, Path fileName) throws IOException {
+  public static String readFile(FileSystem fs, Path fileName)
+      throws IOException {
+    byte buf[] = readFileBuffer(fs, fileName);
+	return new String(buf, 0, buf.length);
+  }
+
+  public static byte[] readFileBuffer(FileSystem fs, Path fileName) 
+      throws IOException {
     ByteArrayOutputStream os = new ByteArrayOutputStream();
-    IOUtils.copyBytes(fs.open(fileName), os, 1024, true);
-    return os.toString();
+    try {
+      FSDataInputStream in = fs.open(fileName);
+      try {
+        IOUtils.copyBytes(fs.open(fileName), os, 1024, true);
+        return os.toByteArray();
+      } finally {
+        in.close();
+      }
+    } finally {
+      os.close();
+    }
   }
   
   public static void createFile(FileSystem fs, Path fileName, long fileLen, 
@@ -227,6 +251,13 @@ public class DFSTestUtil {
         out.close();
       }
     }
+  }
+  
+  public static byte[] calculateFileContentsFromSeed(long seed, int length) {
+    Random rb = new Random(seed);
+    byte val[] = new byte[length];
+    rb.nextBytes(val);
+    return val;
   }
   
   /** check if the files have been copied correctly. */
@@ -548,8 +579,12 @@ public class DFSTestUtil {
   
   public static ExtendedBlock getFirstBlock(FileSystem fs, Path path) throws IOException {
     HdfsDataInputStream in = (HdfsDataInputStream) fs.open(path);
-    in.readByte();
-    return in.getCurrentBlock();
+    try {
+      in.readByte();
+      return in.getCurrentBlock();
+    } finally {
+      in.close();
+    }
   }  
 
   public static List<LocatedBlock> getAllBlocks(FSDataInputStream in)
@@ -883,27 +918,13 @@ public class DFSTestUtil {
   }
   
   public static DatanodeRegistration getLocalDatanodeRegistration() {
-    return new DatanodeRegistration(getLocalDatanodeID(),
-        new StorageInfo(), new ExportedBlockKeys(), VersionInfo.getVersion());
+    return new DatanodeRegistration(getLocalDatanodeID(), new StorageInfo(
+        NodeType.DATA_NODE), new ExportedBlockKeys(), VersionInfo.getVersion());
   }
   
   /** Copy one file's contents into the other **/
   public static void copyFile(File src, File dest) throws IOException {
-    InputStream in = null;
-    OutputStream out = null;
-    
-    try {
-      in = new FileInputStream(src);
-      out = new FileOutputStream(dest);
-
-      byte [] b = new byte[1024];
-      while( in.read(b)  > 0 ) {
-        out.write(b);
-      }
-    } finally {
-      if(in != null) in.close();
-      if(out != null) out.close();
-    }
+    FileUtils.copyFile(src, dest);
   }
 
   public static class Builder {
@@ -1061,6 +1082,8 @@ public class DFSTestUtil {
     filesystem.removeCacheDirective(id);
     // OP_REMOVE_CACHE_POOL
     filesystem.removeCachePool("pool1");
+    // OP_SET_ACL
+    filesystem.setAcl(pathConcatTarget, Lists.<AclEntry> newArrayList());
   }
 
   public static void abortStream(DFSOutputStream out) throws IOException {
@@ -1071,5 +1094,48 @@ public class DFSTestUtil {
     byte arr[] = new byte[buf.remaining()];
     buf.duplicate().get(arr);
     return arr;
+  }
+
+  /**
+   * Blocks until cache usage hits the expected new value.
+   */
+  public static long verifyExpectedCacheUsage(final long expectedCacheUsed,
+      final long expectedBlocks, final FsDatasetSpi<?> fsd) throws Exception {
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      private int tries = 0;
+      
+      @Override
+      public Boolean get() {
+        long curCacheUsed = fsd.getCacheUsed();
+        long curBlocks = fsd.getNumBlocksCached();
+        if ((curCacheUsed != expectedCacheUsed) ||
+            (curBlocks != expectedBlocks)) {
+          if (tries++ > 10) {
+            LOG.info("verifyExpectedCacheUsage: have " +
+                curCacheUsed + "/" + expectedCacheUsed + " bytes cached; " +
+                curBlocks + "/" + expectedBlocks + " blocks cached. " +
+                "memlock limit = " +
+                NativeIO.POSIX.getCacheManipulator().getMemlockLimit() +
+                ".  Waiting...");
+          }
+          return false;
+        }
+        return true;
+      }
+    }, 100, 60000);
+    return expectedCacheUsed;
+  }
+
+  /**
+   * Round a long value up to a multiple of a factor.
+   *
+   * @param val    The value.
+   * @param factor The factor to round up to.  Must be > 1.
+   * @return       The rounded value.
+   */
+  public static long roundUpToMultiple(long val, int factor) {
+    assert (factor > 1);
+    long c = (val + factor - 1) / factor;
+    return c * factor;
   }
 }

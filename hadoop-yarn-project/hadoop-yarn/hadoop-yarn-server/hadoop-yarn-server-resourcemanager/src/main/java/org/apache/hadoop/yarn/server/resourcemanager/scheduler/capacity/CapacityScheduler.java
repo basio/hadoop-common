@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -103,9 +104,6 @@ public class CapacityScheduler extends AbstractYarnScheduler
   private static final Log LOG = LogFactory.getLog(CapacityScheduler.class);
 
   private CSQueue root;
-
-  private final static List<Container> EMPTY_CONTAINER_LIST = 
-    new ArrayList<Container>();
 
   static final Comparator<CSQueue> queueComparator = new Comparator<CSQueue>() {
     @Override
@@ -260,8 +258,10 @@ public class CapacityScheduler extends AbstractYarnScheduler
   @Override
   public synchronized void
       reinitialize(Configuration conf, RMContext rmContext) throws IOException {
+    Configuration configuration = new Configuration(conf);
     if (!initialized) {
-      this.conf = new CapacitySchedulerConfiguration(conf);
+      this.rmContext = rmContext;
+      this.conf = loadCapacitySchedulerConfiguration(configuration);
       validateConf(this.conf);
       this.minimumAllocation = this.conf.getMinimumAllocation();
       this.maximumAllocation = this.conf.getMaximumAllocation();
@@ -269,7 +269,6 @@ public class CapacityScheduler extends AbstractYarnScheduler
       this.usePortForNodeName = this.conf.getUsePortForNodeName();
       this.applications =
           new ConcurrentHashMap<ApplicationId, SchedulerApplication>();
-      this.rmContext = rmContext;
 
       initializeQueues(this.conf);
       
@@ -279,9 +278,8 @@ public class CapacityScheduler extends AbstractYarnScheduler
           "minimumAllocation=<" + getMinimumResourceCapability() + ">, " +
           "maximumAllocation=<" + getMaximumResourceCapability() + ">");
     } else {
-
       CapacitySchedulerConfiguration oldConf = this.conf; 
-      this.conf = new CapacitySchedulerConfiguration(conf);
+      this.conf = loadCapacitySchedulerConfiguration(configuration);
       validateConf(this.conf);
       try {
         LOG.info("Re-initializing queues...");
@@ -307,6 +305,7 @@ public class CapacityScheduler extends AbstractYarnScheduler
   @Lock(CapacityScheduler.class)
   private void initializeQueues(CapacitySchedulerConfiguration conf)
     throws IOException {
+
     root = 
         parseQueue(this, conf, null, CapacitySchedulerConfiguration.ROOT, 
             queues, queues, noop);
@@ -555,9 +554,6 @@ public class CapacityScheduler extends AbstractYarnScheduler
       queue.finishApplicationAttempt(attempt, queue.getQueueName());
     }
   }
-
-  private static final Allocation EMPTY_ALLOCATION = 
-      new Allocation(EMPTY_CONTAINER_LIST, Resources.createResource(0, 0));
 
   @Override
   @Lock(Lock.NoLock.class)
@@ -1024,5 +1020,22 @@ public class CapacityScheduler extends AbstractYarnScheduler
     List<ApplicationAttemptId> apps = new ArrayList<ApplicationAttemptId>();
     queue.collectSchedulerApplications(apps);
     return apps;
+  }
+
+  private CapacitySchedulerConfiguration loadCapacitySchedulerConfiguration(
+      Configuration configuration) throws IOException {
+    try {
+      InputStream CSInputStream =
+          this.rmContext.getConfigurationProvider()
+              .getConfigurationInputStream(configuration,
+                  YarnConfiguration.CS_CONFIGURATION_FILE);
+      if (CSInputStream != null) {
+        configuration.addResource(CSInputStream);
+        return new CapacitySchedulerConfiguration(configuration, false);
+      }
+      return new CapacitySchedulerConfiguration(configuration, true);
+    } catch (Exception e) {
+      throw new IOException(e);
+    }
   }
 }

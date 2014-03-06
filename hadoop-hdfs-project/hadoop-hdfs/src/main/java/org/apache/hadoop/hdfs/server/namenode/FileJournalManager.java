@@ -33,14 +33,16 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.StorageErrorReporter;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.namenode.NNStorageRetentionManager.StoragePurger;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogLoader.EditLogValidation;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
@@ -195,6 +197,32 @@ public class FileJournalManager implements JournalManager {
     Collections.sort(ret);
     
     return ret;
+  }
+  
+  /**
+   * Discard all editlog segments whose first txid is greater than or equal to
+   * the given txid, by renaming them with suffix ".trash".
+   */
+  private void discardEditLogSegments(long startTxId) throws IOException {
+    File currentDir = sd.getCurrentDir();
+    List<EditLogFile> allLogFiles = matchEditLogs(currentDir);
+    List<EditLogFile> toTrash = Lists.newArrayList();
+    LOG.info("Discard the EditLog files, the given start txid is " + startTxId);
+    // go through the editlog files to make sure the startTxId is right at the
+    // segment boundary
+    for (EditLogFile elf : allLogFiles) {
+      if (elf.getFirstTxId() >= startTxId) {
+        toTrash.add(elf);
+      } else {
+        Preconditions.checkState(elf.getLastTxId() < startTxId);
+      }
+    }
+
+    for (EditLogFile elf : toTrash) {
+      // rename these editlog file as .trash
+      elf.moveAsideTrashFile(startTxId);
+      LOG.info("Trash the EditLog file " + elf);
+    }
   }
 
   /**
@@ -465,6 +493,11 @@ public class FileJournalManager implements JournalManager {
       renameSelf(".corrupt");
     }
 
+    void moveAsideTrashFile(long markerTxid) throws IOException {
+      assert this.getFirstTxId() >= markerTxid;
+      renameSelf(".trash");
+    }
+
     public void moveAsideEmptyFile() throws IOException {
       assert lastTxId == HdfsConstants.INVALID_TXID;
       renameSelf(".empty");
@@ -488,5 +521,55 @@ public class FileJournalManager implements JournalManager {
                            file.toString(), firstTxId, lastTxId,
                            isInProgress(), hasCorruptHeader);
     }
+  }
+  
+  @Override
+  public void doPreUpgrade() throws IOException {
+    LOG.info("Starting upgrade of edits directory " + sd.getRoot());
+    try {
+     NNUpgradeUtil.doPreUpgrade(sd);
+    } catch (IOException ioe) {
+     LOG.error("Failed to move aside pre-upgrade storage " +
+         "in image directory " + sd.getRoot(), ioe);
+     throw ioe;
+    }
+  }
+  
+  /**
+   * This method assumes that the fields of the {@link Storage} object have
+   * already been updated to the appropriate new values for the upgrade.
+   */
+  @Override
+  public void doUpgrade(Storage storage) throws IOException {
+    NNUpgradeUtil.doUpgrade(sd, storage);
+  }
+  
+  @Override
+  public void doFinalize() throws IOException {
+    NNUpgradeUtil.doFinalize(sd);
+  }
+
+  @Override
+  public boolean canRollBack(StorageInfo storage, StorageInfo prevStorage,
+      int targetLayoutVersion) throws IOException {
+    return NNUpgradeUtil.canRollBack(sd, storage,
+        prevStorage, targetLayoutVersion);
+  }
+
+  @Override
+  public void doRollback() throws IOException {
+    NNUpgradeUtil.doRollBack(sd);
+  }
+
+  @Override
+  public void discardSegments(long startTxid) throws IOException {
+    discardEditLogSegments(startTxid);
+  }
+
+  @Override
+  public long getJournalCTime() throws IOException {
+    StorageInfo sInfo = new StorageInfo((NodeType)null);
+    sInfo.readProperties(sd);
+    return sInfo.getCTime();
   }
 }

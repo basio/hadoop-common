@@ -66,6 +66,7 @@ import javax.security.sasl.SaslServer;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configuration.IntegerRanges;
@@ -364,7 +365,7 @@ public abstract class Server {
   private final boolean tcpNoDelay; // if T then disable Nagle's Algorithm
 
   volatile private boolean running = true;         // true while server runs
-  private BlockingQueue<Call> callQueue; // queued calls
+  private CallQueueManager<Call> callQueue;
 
   // maintains the set of client connections and handles idle timeouts
   private ConnectionManager connectionManager;
@@ -451,12 +452,34 @@ public abstract class Server {
   }
 
   /**
+   * Refresh the service authorization ACL for the service handled by this server
+   * using the specified Configuration.
+   */
+  @Private
+  public void refreshServiceAclWithLoadedConfiguration(Configuration conf,
+      PolicyProvider provider) {
+    serviceAuthorizationManager.refreshWithLoadedConfiguration(conf, provider);
+  }
+  /**
    * Returns a handle to the serviceAuthorizationManager (required in tests)
    * @return instance of ServiceAuthorizationManager for this server
    */
   @InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
   public ServiceAuthorizationManager getServiceAuthorizationManager() {
     return serviceAuthorizationManager;
+  }
+
+  /*
+   * Refresh the call queue
+   */
+  public synchronized void refreshCallQueue(Configuration conf) {
+    // Create the next queue
+    String prefix = CommonConfigurationKeys.IPC_CALLQUEUE_NAMESPACE + "." +
+      this.port;
+    Class queueClassToUse = conf.getClass(prefix + "." +
+      CommonConfigurationKeys.IPC_CALLQUEUE_IMPL_KEY, LinkedBlockingQueue.class);
+
+    callQueue.swapQueue(queueClassToUse, maxQueueSize, prefix, conf);
   }
 
   /** A call queued for handling. */
@@ -2183,7 +2206,15 @@ public abstract class Server {
     this.readerPendingConnectionQueue = conf.getInt(
         CommonConfigurationKeys.IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE_KEY,
         CommonConfigurationKeys.IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE_DEFAULT);
-    this.callQueue  = new LinkedBlockingQueue<Call>(maxQueueSize); 
+
+    // Setup appropriate callqueue
+    String prefix = CommonConfigurationKeys.IPC_CALLQUEUE_NAMESPACE + "." +
+        this.port;
+    Class queueClassToUse = conf.getClass(prefix + "." +
+        CommonConfigurationKeys.IPC_CALLQUEUE_IMPL_KEY, LinkedBlockingQueue.class);
+    this.callQueue = new CallQueueManager<Call>(queueClassToUse, maxQueueSize,
+      prefix, conf);
+
     this.secretManager = (SecretManager<TokenIdentifier>) secretManager;
     this.authorize = 
       conf.getBoolean(CommonConfigurationKeys.HADOOP_SECURITY_AUTHORIZATION, 
@@ -2206,7 +2237,7 @@ public abstract class Server {
     // Create the responder here
     responder = new Responder();
     
-    if (secretManager != null) {
+    if (secretManager != null || UserGroupInformation.isSecurityEnabled()) {
       SaslRpcServer.init(conf);
     }
     

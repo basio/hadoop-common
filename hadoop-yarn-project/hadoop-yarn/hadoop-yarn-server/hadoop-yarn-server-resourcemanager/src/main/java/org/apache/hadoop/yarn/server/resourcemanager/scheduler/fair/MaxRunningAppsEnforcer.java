@@ -24,6 +24,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ListMultimap;
@@ -33,6 +36,8 @@ import com.google.common.collect.ListMultimap;
  * constraints
  */
 public class MaxRunningAppsEnforcer {
+  private static final Log LOG = LogFactory.getLog(FairScheduler.class);
+  
   private final FairScheduler scheduler;
 
   // Tracks the number of running applications by user.
@@ -100,26 +105,15 @@ public class MaxRunningAppsEnforcer {
   }
 
   /**
-   * Updates the relevant tracking variables after a runnable app with the given
-   * queue and user has been removed. Checks to see whether any other applications
-   * are now runnable and makes them so.
+   * Checks to see whether any other applications runnable now that the given
+   * application has been removed from the given queue.  And makes them so.
    * 
    * Runs in O(n log(n)) where n is the number of queues that are under the
    * highest queue that went from having no slack to having slack.
    */
-  public void updateRunnabilityOnAppRemoval(FSSchedulerApp app) {
+  public void updateRunnabilityOnAppRemoval(FSSchedulerApp app, FSLeafQueue queue) {
     AllocationConfiguration allocConf = scheduler.getAllocationConfiguration();
     
-    // Update usersRunnableApps
-    String user = app.getUser();
-    int newUserNumRunning = usersNumRunnableApps.get(user) - 1;
-    if (newUserNumRunning == 0) {
-      usersNumRunnableApps.remove(user);
-    } else {
-      usersNumRunnableApps.put(user, newUserNumRunning);
-    }
-
-    // Update runnable app bookkeeping for queues:
     // childqueueX might have no pending apps itself, but if a queue higher up
     // in the hierarchy parentqueueY has a maxRunningApps set, an app completion
     // in childqueueX could allow an app in some other distant child of
@@ -128,16 +122,14 @@ public class MaxRunningAppsEnforcer {
     // the queue was already at its max before the removal.
     // Thus we find the ancestor queue highest in the tree for which the app
     // that was at its maxRunningApps before the removal.
-    FSLeafQueue queue = app.getQueue();
     FSQueue highestQueueWithAppsNowRunnable = (queue.getNumRunnableApps() ==
         allocConf.getQueueMaxApps(queue.getName()) - 1) ? queue : null;
     FSParentQueue parent = queue.getParent();
     while (parent != null) {
       if (parent.getNumRunnableApps() == allocConf.getQueueMaxApps(parent
-          .getName())) {
+          .getName()) - 1) {
         highestQueueWithAppsNowRunnable = parent;
       }
-      parent.decrementRunnableApps();
       parent = parent.getParent();
     }
 
@@ -152,7 +144,12 @@ public class MaxRunningAppsEnforcer {
       gatherPossiblyRunnableAppLists(highestQueueWithAppsNowRunnable,
           appsNowMaybeRunnable);
     }
-    if (newUserNumRunning == allocConf.getUserMaxApps(user) - 1) {
+    String user = app.getUser();
+    Integer userNumRunning = usersNumRunnableApps.get(user);
+    if (userNumRunning == null) {
+      userNumRunning = 0;
+    }
+    if (userNumRunning == allocConf.getUserMaxApps(user) - 1) {
       List<AppSchedulable> userWaitingApps = usersNonRunnableApps.get(user);
       if (userWaitingApps != null) {
         appsNowMaybeRunnable.add(userWaitingApps);
@@ -163,7 +160,7 @@ public class MaxRunningAppsEnforcer {
     Iterator<FSSchedulerApp> iter = new MultiListStartTimeIterator(
         appsNowMaybeRunnable);
     FSSchedulerApp prev = null;
-    int numNowRunnable = 0;
+    List<AppSchedulable> noLongerPendingApps = new ArrayList<AppSchedulable>();
     while (iter.hasNext()) {
       FSSchedulerApp next = iter.next();
       if (next == prev) {
@@ -173,20 +170,56 @@ public class MaxRunningAppsEnforcer {
       if (canAppBeRunnable(next.getQueue(), next.getUser())) {
         trackRunnableApp(next);
         AppSchedulable appSched = next.getAppSchedulable();
-        next.getQueue().makeAppRunnable(appSched);
-        if (!usersNonRunnableApps.remove(next.getUser(), appSched)) {
-          throw new IllegalStateException("Waiting app " + next
-              + " expected to be in usersNonRunnableApps");
-        }
+        next.getQueue().getRunnableAppSchedulables().add(appSched);
+        noLongerPendingApps.add(appSched);
 
         // No more than one app per list will be able to be made runnable, so
         // we can stop looking after we've found that many
-        if (numNowRunnable >= appsNowMaybeRunnable.size()) {
+        if (noLongerPendingApps.size() >= appsNowMaybeRunnable.size()) {
           break;
         }
       }
 
       prev = next;
+    }
+    
+    // We remove the apps from their pending lists afterwards so that we don't
+    // pull them out from under the iterator.  If they are not in these lists
+    // in the first place, there is a bug.
+    for (AppSchedulable appSched : noLongerPendingApps) {
+      if (!appSched.getApp().getQueue().getNonRunnableAppSchedulables()
+          .remove(appSched)) {
+        LOG.error("Can't make app runnable that does not already exist in queue"
+            + " as non-runnable: " + appSched + ". This should never happen.");
+      }
+      
+      if (!usersNonRunnableApps.remove(appSched.getApp().getUser(), appSched)) {
+        LOG.error("Waiting app " + appSched + " expected to be in "
+        		+ "usersNonRunnableApps, but was not. This should never happen.");
+      }
+    }
+  }
+  
+  /**
+   * Updates the relevant tracking variables after a runnable app with the given
+   * queue and user has been removed.
+   */
+  public void untrackRunnableApp(FSSchedulerApp app) {
+    // Update usersRunnableApps
+    String user = app.getUser();
+    int newUserNumRunning = usersNumRunnableApps.get(user) - 1;
+    if (newUserNumRunning == 0) {
+      usersNumRunnableApps.remove(user);
+    } else {
+      usersNumRunnableApps.put(user, newUserNumRunning);
+    }
+    
+    // Update runnable app bookkeeping for queues
+    FSLeafQueue queue = app.getQueue();
+    FSParentQueue parent = queue.getParent();
+    while (parent != null) {
+      parent.decrementRunnableApps();
+      parent = parent.getParent();
     }
   }
   
@@ -225,7 +258,7 @@ public class MaxRunningAppsEnforcer {
    * This allows us to pick which list to advance in O(log(num lists)) instead
    * of O(num lists) time.
    */
-  private static class MultiListStartTimeIterator implements
+  static class MultiListStartTimeIterator implements
       Iterator<FSSchedulerApp> {
 
     private List<AppSchedulable>[] appLists;

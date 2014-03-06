@@ -35,6 +35,7 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
+import org.apache.hadoop.util.Time;
 
 /**
  * OfflineEditsViewerHelper is a helper class for TestOfflineEditsViewer,
@@ -96,6 +97,7 @@ public class OfflineEditsViewerHelper {
       "RULE:[2:$1@$0](JobTracker@.*FOO.COM)s/@.*//" + "DEFAULT");
     config.setBoolean(
         DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_ALWAYS_USE_KEY, true);
+    config.setBoolean(DFSConfigKeys.DFS_NAMENODE_ACLS_ENABLED_KEY, true);
     cluster =
       new MiniDFSCluster.Builder(config).manageNameDfsDirs(false).build();
     cluster.waitClusterUp();
@@ -127,6 +129,11 @@ public class OfflineEditsViewerHelper {
     DistributedFileSystem dfs = (DistributedFileSystem) cluster.getFileSystem();
     DFSTestUtil.runOperations(cluster, dfs, cluster.getConfiguration(0),
         dfs.getDefaultBlockSize(), 0);
+
+    // OP_ROLLING_UPGRADE_START
+    cluster.getNamesystem().getEditLog().logStartRollingUpgrade(Time.now());
+    // OP_ROLLING_UPGRADE_FINALIZE
+    cluster.getNamesystem().getEditLog().logFinalizeRollingUpgrade(Time.now());
 
     // Force a roll so we get an OP_END_LOG_SEGMENT txn
     return cluster.getNameNodeRpc().rollEditLog();

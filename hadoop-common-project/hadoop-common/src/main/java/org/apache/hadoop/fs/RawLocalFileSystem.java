@@ -16,7 +16,10 @@
  * limitations under the License.
  */
 
+
 package org.apache.hadoop.fs;
+
+import com.google.common.annotations.VisibleForTesting;
 
 import java.io.BufferedOutputStream;
 import java.io.DataOutput;
@@ -51,7 +54,13 @@ import org.apache.hadoop.util.StringUtils;
 public class RawLocalFileSystem extends FileSystem {
   static final URI NAME = URI.create("file:///");
   private Path workingDir;
-  private static final boolean useDeprecatedFileStatus = !Stat.isAvailable();
+  // Temporary workaround for HADOOP-9652.
+  private static boolean useDeprecatedFileStatus = true;
+
+  @VisibleForTesting
+  public static void useStatIfAvailable() {
+    useDeprecatedFileStatus = !Stat.isAvailable();
+  }
   
   public RawLocalFileSystem() {
     workingDir = getInitialWorkingDirectory();
@@ -560,8 +569,10 @@ public class RawLocalFileSystem extends FileSystem {
         //expected format
         //-rw-------    1 username groupname ...
         String permission = t.nextToken();
-        if (permission.length() > 10) { //files with ACLs might have a '+'
-          permission = permission.substring(0, 10);
+        if (permission.length() > FsPermission.MAX_PERMISSION_LENGTH) {
+          //files with ACLs might have a '+'
+          permission = permission.substring(0,
+            FsPermission.MAX_PERMISSION_LENGTH);
         }
         setPermission(FsPermission.valueOf(permission));
         t.nextToken();

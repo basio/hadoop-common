@@ -125,6 +125,7 @@ public class TestRetryCacheWithHA {
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BlockSize);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_LIST_CACHE_DIRECTIVES_NUM_RESPONSES, ResponseSize);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_LIST_CACHE_POOLS_NUM_RESPONSES, ResponseSize);
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_ACLS_ENABLED_KEY, true);
     cluster = new MiniDFSCluster.Builder(conf)
         .nnTopology(MiniDFSNNTopology.simpleHATopology())
         .numDataNodes(DataNodes).build();
@@ -1180,6 +1181,26 @@ public class TestRetryCacheWithHA {
       LOG.info("Got the result of " + op.name + ": "
           + results.get(op.name));
     }
+
+    // Waiting for failover.
+    while (cluster.getNamesystem(1).isInStandbyState()) {
+      Thread.sleep(10);
+    }
+
+    long hitNN0 = cluster.getNamesystem(0).getRetryCache().getMetricsForTests()
+        .getCacheHit();
+    long hitNN1 = cluster.getNamesystem(1).getRetryCache().getMetricsForTests()
+        .getCacheHit();
+    assertTrue("CacheHit: " + hitNN0 + ", " + hitNN1,
+        hitNN0 + hitNN1 > 0);
+    long updatedNN0 = cluster.getNamesystem(0).getRetryCache()
+        .getMetricsForTests().getCacheUpdated();
+    long updatedNN1 = cluster.getNamesystem(1).getRetryCache()
+        .getMetricsForTests().getCacheUpdated();
+    // Cache updated metrics on NN0 should be >0 since the op was process on NN0
+    assertTrue("CacheUpdated on NN0: " + updatedNN0, updatedNN0 > 0);
+    // Cache updated metrics on NN0 should be >0 since NN1 applied the editlog
+    assertTrue("CacheUpdated on NN1: " + updatedNN1, updatedNN1 > 0);
   }
 
   /**

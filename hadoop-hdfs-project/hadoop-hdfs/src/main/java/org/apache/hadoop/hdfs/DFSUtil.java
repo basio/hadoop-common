@@ -42,7 +42,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -83,7 +83,7 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.web.SWebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.http.HttpConfig;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.net.NetUtils;
@@ -261,6 +261,47 @@ public class DFSUtil {
   }
 
   /**
+   * Checks if a string is a valid path component. For instance, components
+   * cannot contain a ":" or "/", and cannot be equal to a reserved component
+   * like ".snapshot".
+   * <p>
+   * The primary use of this method is for validating paths when loading the
+   * FSImage. During normal NN operation, paths are sometimes allowed to
+   * contain reserved components.
+   * 
+   * @return If component is valid
+   */
+  public static boolean isValidNameForComponent(String component) {
+    if (component.equals(".") ||
+        component.equals("..") ||
+        component.indexOf(":") >= 0 ||
+        component.indexOf("/") >= 0) {
+      return false;
+    }
+    return !isReservedPathComponent(component);
+  }
+
+
+  /**
+   * Returns if the component is reserved.
+   * 
+   * <p>
+   * Note that some components are only reserved under certain directories, e.g.
+   * "/.reserved" is reserved, while "/hadoop/.reserved" is not.
+   * 
+   * @param component
+   * @return if the component is reserved
+   */
+  public static boolean isReservedPathComponent(String component) {
+    for (String reserved : HdfsConstants.RESERVED_PATH_COMPONENTS) {
+      if (component.equals(reserved)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Converts a byte array to a string using UTF8 encoding.
    */
   public static String bytes2String(byte[] bytes) {
@@ -311,7 +352,25 @@ public class DFSUtil {
     }
     return result.toString();
   }
-  
+
+  /**
+   * Converts a list of path components into a path using Path.SEPARATOR.
+   * 
+   * @param components Path components
+   * @return Combined path as a UTF-8 string
+   */
+  public static String strings2PathString(String[] components) {
+    if (components.length == 0) {
+      return "";
+    }
+    if (components.length == 1) {
+      if (components[0] == null || components[0].isEmpty()) {
+        return Path.SEPARATOR;
+      }
+    }
+    return Joiner.on(Path.SEPARATOR).join(components);
+  }
+
   /**
    * Given a list of path components returns a byte array
    */
@@ -574,10 +633,24 @@ public class DFSUtil {
     }
     return ret;
   }
+  
+  /**
+   * Get all of the RPC addresses of the individual NNs in a given nameservice.
+   * 
+   * @param conf Configuration
+   * @param nsId the nameservice whose NNs addresses we want.
+   * @param defaultValue default address to return in case key is not found.
+   * @return A map from nnId -> RPC address of each NN in the nameservice.
+   */
+  public static Map<String, InetSocketAddress> getRpcAddressesForNameserviceId(
+      Configuration conf, String nsId, String defaultValue) {
+    return getAddressesForNameserviceId(conf, nsId, defaultValue,
+        DFS_NAMENODE_RPC_ADDRESS_KEY);
+  }
 
   private static Map<String, InetSocketAddress> getAddressesForNameserviceId(
       Configuration conf, String nsId, String defaultValue,
-      String[] keys) {
+      String... keys) {
     Collection<String> nnIds = getNameNodeIds(conf, nsId);
     Map<String, InetSocketAddress> ret = Maps.newHashMap();
     for (String nnId : emptyAsSingletonNull(nnIds)) {
@@ -656,46 +729,6 @@ public class DFSUtil {
     }
   }
 
-  /**
-   * Resolve an HDFS URL into real INetSocketAddress. It works like a DNS resolver
-   * when the URL points to an non-HA cluster. When the URL points to an HA
-   * cluster, the resolver further resolves the logical name (i.e., the authority
-   * in the URL) into real namenode addresses.
-   */
-  public static InetSocketAddress[] resolveWebHdfsUri(URI uri, Configuration conf)
-      throws IOException {
-    int defaultPort;
-    String scheme = uri.getScheme();
-    if (WebHdfsFileSystem.SCHEME.equals(scheme)) {
-      defaultPort = DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT;
-    } else if (SWebHdfsFileSystem.SCHEME.equals(scheme)) {
-      defaultPort = DFSConfigKeys.DFS_NAMENODE_HTTPS_PORT_DEFAULT;
-    } else {
-      throw new IllegalArgumentException("Unsupported scheme: " + scheme);
-    }
-
-    ArrayList<InetSocketAddress> ret = new ArrayList<InetSocketAddress>();
-
-    if (!HAUtil.isLogicalUri(conf, uri)) {
-      InetSocketAddress addr = NetUtils.createSocketAddr(uri.getAuthority(),
-          defaultPort);
-      ret.add(addr);
-
-    } else {
-      Map<String, Map<String, InetSocketAddress>> addresses = DFSUtil
-          .getHaNnWebHdfsAddresses(conf, scheme);
-
-      for (Map<String, InetSocketAddress> addrs : addresses.values()) {
-        for (InetSocketAddress addr : addrs.values()) {
-          ret.add(addr);
-        }
-      }
-    }
-
-    InetSocketAddress[] r = new InetSocketAddress[ret.size()];
-    return ret.toArray(r);
-  }
-  
   /**
    * Returns list of InetSocketAddress corresponding to  backup node rpc 
    * addresses from the configuration.
@@ -1479,52 +1512,22 @@ public class DFSUtil {
   }
 
   /**
-   * Get http policy. Http Policy is chosen as follows:
-   * <ol>
-   * <li>If hadoop.ssl.enabled is set, http endpoints are not started. Only
-   * https endpoints are started on configured https ports</li>
-   * <li>This configuration is overridden by dfs.https.enable configuration, if
-   * it is set to true. In that case, both http and https endpoints are stared.</li>
-   * <li>All the above configurations are overridden by dfs.http.policy
-   * configuration. With this configuration you can set http-only, https-only
-   * and http-and-https endpoints.</li>
-   * </ol>
-   * See hdfs-default.xml documentation for more details on each of the above
-   * configuration settings.
+   * Get http policy.
    */
   public static HttpConfig.Policy getHttpPolicy(Configuration conf) {
-    String httpPolicy = conf.get(DFSConfigKeys.DFS_HTTP_POLICY_KEY,
+    String policyStr = conf.get(DFSConfigKeys.DFS_HTTP_POLICY_KEY,
         DFSConfigKeys.DFS_HTTP_POLICY_DEFAULT);
-
-    HttpConfig.Policy policy = HttpConfig.Policy.fromString(httpPolicy);
-
-    if (policy == HttpConfig.Policy.HTTP_ONLY) {
-      boolean httpsEnabled = conf.getBoolean(
-          DFSConfigKeys.DFS_HTTPS_ENABLE_KEY,
-          DFSConfigKeys.DFS_HTTPS_ENABLE_DEFAULT);
-
-      boolean hadoopSslEnabled = conf.getBoolean(
-          CommonConfigurationKeys.HADOOP_SSL_ENABLED_KEY,
-          CommonConfigurationKeys.HADOOP_SSL_ENABLED_DEFAULT);
-
-      if (hadoopSslEnabled) {
-        LOG.warn(CommonConfigurationKeys.HADOOP_SSL_ENABLED_KEY
-            + " is deprecated. Please use "
-            + DFSConfigKeys.DFS_HTTPS_ENABLE_KEY + ".");
-        policy = HttpConfig.Policy.HTTPS_ONLY;
-      } else if (httpsEnabled) {
-        LOG.warn(DFSConfigKeys.DFS_HTTPS_ENABLE_KEY
-            + " is deprecated. Please use "
-            + DFSConfigKeys.DFS_HTTPS_ENABLE_KEY + ".");
-        policy = HttpConfig.Policy.HTTP_AND_HTTPS;
-      }
+    HttpConfig.Policy policy = HttpConfig.Policy.fromString(policyStr);
+    if (policy == null) {
+      throw new HadoopIllegalArgumentException("Unregonized value '"
+          + policyStr + "' for " + DFSConfigKeys.DFS_HTTP_POLICY_KEY);
     }
 
     conf.set(DFSConfigKeys.DFS_HTTP_POLICY_KEY, policy.name());
     return policy;
   }
 
-  public static HttpServer.Builder loadSslConfToHttpServerBuilder(HttpServer.Builder builder,
+  public static HttpServer2.Builder loadSslConfToHttpServerBuilder(HttpServer2.Builder builder,
       Configuration sslConf) {
     return builder
         .needsClientAuth(
@@ -1629,13 +1632,13 @@ public class DFSUtil {
    * namenode can use to initialize their HTTP / HTTPS server.
    *
    */
-  public static HttpServer.Builder httpServerTemplateForNNAndJN(
+  public static HttpServer2.Builder httpServerTemplateForNNAndJN(
       Configuration conf, final InetSocketAddress httpAddr,
       final InetSocketAddress httpsAddr, String name, String spnegoUserNameKey,
       String spnegoKeytabFileKey) throws IOException {
     HttpConfig.Policy policy = getHttpPolicy(conf);
 
-    HttpServer.Builder builder = new HttpServer.Builder().setName(name)
+    HttpServer2.Builder builder = new HttpServer2.Builder().setName(name)
         .setConf(conf).setACL(new AccessControlList(conf.get(DFS_ADMIN, " ")))
         .setSecurityEnabled(UserGroupInformation.isSecurityEnabled())
         .setUsernameConfKey(spnegoUserNameKey)
@@ -1669,5 +1672,33 @@ public class DFSUtil {
       LOG.info("Starting Web-server for " + name + " at: " + uri);
     }
     return builder;
+  }
+
+  /**
+   * Assert that all objects in the collection are equal. Returns silently if
+   * so, throws an AssertionError if any object is not equal. All null values
+   * are considered equal.
+   * 
+   * @param objects the collection of objects to check for equality.
+   */
+  public static void assertAllResultsEqual(Collection<?> objects) {
+    Object[] resultsArray = objects.toArray();
+    
+    if (resultsArray.length == 0)
+      return;
+    
+    for (int i = 0; i < resultsArray.length; i++) {
+      if (i == 0)
+        continue;
+      else {
+        Object currElement = resultsArray[i];
+        Object lastElement = resultsArray[i - 1];
+        if ((currElement == null && currElement != lastElement) ||
+            (currElement != null && !currElement.equals(lastElement))) {
+          throw new AssertionError("Not all elements match in results: " +
+            Arrays.toString(resultsArray));
+        }
+      }
+    }
   }
 }

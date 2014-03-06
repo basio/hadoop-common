@@ -548,7 +548,7 @@ public abstract class RMStateStore extends AbstractService {
       ApplicationState appState) throws Exception;
 
   // TODO: This should eventually become cluster-Id + "AM_RM_TOKEN_SERVICE". See
-  // YARN-986 
+  // YARN-1779
   public static final Text AM_RM_TOKEN_SERVICE = new Text(
     "AM_RM_TOKEN_SERVICE");
 
@@ -676,11 +676,11 @@ public abstract class RMStateStore extends AbstractService {
 
   @SuppressWarnings("unchecked")
   /**
-   * In {#handleStoreEvent}, this method is called to notify the
-   * ResourceManager that the store operation has failed.
+   * This method is called to notify the ResourceManager that the store
+   * operation has failed.
    * @param failureCause the exception due to which the operation failed
    */
-  private void notifyStoreOperationFailed(Exception failureCause) {
+  protected void notifyStoreOperationFailed(Exception failureCause) {
     RMFatalEventType type;
     if (failureCause instanceof StoreFencedException) {
       type = RMFatalEventType.STATE_STORE_FENCED;

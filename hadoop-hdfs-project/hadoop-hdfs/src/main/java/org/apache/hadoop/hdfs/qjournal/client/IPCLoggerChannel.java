@@ -46,6 +46,7 @@ import org.apache.hadoop.hdfs.qjournal.protocol.RequestInfo;
 import org.apache.hadoop.hdfs.qjournal.protocolPB.QJournalProtocolPB;
 import org.apache.hadoop.hdfs.qjournal.protocolPB.QJournalProtocolTranslatorPB;
 import org.apache.hadoop.hdfs.qjournal.server.GetJournalEditServlet;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
@@ -181,7 +182,6 @@ public class IPCLoggerChannel implements AsyncLogger {
   
   @Override
   public void close() {
-    QuorumJournalManager.LOG.info("Closing", new Exception());
     // No more tasks may be submitted after this point.
     executor.shutdown();
     if (proxy != null) {
@@ -564,6 +564,83 @@ public class IPCLoggerChannel implements AsyncLogger {
       }
     });
   }
+  
+  @Override
+  public ListenableFuture<Void> doPreUpgrade() {
+    return executor.submit(new Callable<Void>() {
+      @Override
+      public Void call() throws IOException {
+        getProxy().doPreUpgrade(journalId);
+        return null;
+      }
+    });
+  }
+  
+  @Override
+  public ListenableFuture<Void> doUpgrade(final StorageInfo sInfo) {
+    return executor.submit(new Callable<Void>() {
+      @Override
+      public Void call() throws IOException {
+        getProxy().doUpgrade(journalId, sInfo);
+        return null;
+      }
+    });
+  }
+  
+  @Override
+  public ListenableFuture<Void> doFinalize() {
+    return executor.submit(new Callable<Void>() {
+      @Override
+      public Void call() throws IOException {
+        getProxy().doFinalize(journalId);
+        return null;
+      }
+    });
+  }
+  
+  @Override
+  public ListenableFuture<Boolean> canRollBack(final StorageInfo storage,
+      final StorageInfo prevStorage, final int targetLayoutVersion) {
+    return executor.submit(new Callable<Boolean>() {
+      @Override
+      public Boolean call() throws IOException {
+        return getProxy().canRollBack(journalId, storage, prevStorage,
+            targetLayoutVersion);
+      }
+    });
+  }
+
+  @Override
+  public ListenableFuture<Void> doRollback() {
+    return executor.submit(new Callable<Void>() {
+      @Override
+      public Void call() throws IOException {
+        getProxy().doRollback(journalId);
+        return null;
+      }
+    });
+  }
+
+  @Override
+  public ListenableFuture<Void> discardSegments(final long startTxId) {
+    return executor.submit(new Callable<Void>() {
+      @Override
+      public Void call() throws IOException {
+        getProxy().discardSegments(journalId, startTxId);
+        return null;
+      }
+    });
+  }
+
+  @Override
+  public ListenableFuture<Long> getJournalCTime() {
+    return executor.submit(new Callable<Long>() {
+      @Override
+      public Long call() throws IOException {
+        return getProxy().getJournalCTime(journalId);
+      }
+    });
+  }
 
   @Override
   public String toString() {
@@ -636,4 +713,5 @@ public class IPCLoggerChannel implements AsyncLogger {
   private boolean hasHttpServerEndPoint() {
    return httpServerURL != null;
   }
+
 }

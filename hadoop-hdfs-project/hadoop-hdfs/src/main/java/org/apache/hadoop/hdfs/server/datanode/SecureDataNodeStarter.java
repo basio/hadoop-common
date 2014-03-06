@@ -25,9 +25,10 @@ import org.apache.commons.daemon.DaemonContext;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.http.HttpConfig;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.mortbay.jetty.Connector;
 
@@ -62,7 +63,9 @@ public class SecureDataNodeStarter implements Daemon {
   @Override
   public void init(DaemonContext context) throws Exception {
     System.err.println("Initializing secure datanode resources");
-    Configuration conf = new Configuration();
+    // Create a new HdfsConfiguration object to ensure that the configuration in
+    // hdfs-site.xml is picked up.
+    Configuration conf = new HdfsConfiguration();
     
     // Stash command-line arguments for regular datanode
     args = context.getArguments();
@@ -119,7 +122,7 @@ public class SecureDataNodeStarter implements Daemon {
     // certificates if they are communicating through SSL.
     Connector listener = null;
     if (policy.isHttpEnabled()) {
-      listener = HttpServer.createDefaultChannelConnector();
+      listener = HttpServer2.createDefaultChannelConnector();
       InetSocketAddress infoSocAddr = DataNode.getInfoAddr(conf);
       listener.setHost(infoSocAddr.getHostName());
       listener.setPort(infoSocAddr.getPort());

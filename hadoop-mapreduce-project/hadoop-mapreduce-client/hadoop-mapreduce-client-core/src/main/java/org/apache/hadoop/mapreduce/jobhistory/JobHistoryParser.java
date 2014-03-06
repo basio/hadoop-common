@@ -183,6 +183,9 @@ public class JobHistoryParser implements HistoryEventHandler {
     case JOB_PRIORITY_CHANGED:
       handleJobPriorityChangeEvent((JobPriorityChangeEvent) event);
       break;
+    case JOB_QUEUE_CHANGED:
+      handleJobQueueChangeEvent((JobQueueChangeEvent) event);
+      break;
     case JOB_FAILED:
     case JOB_KILLED:
     case JOB_ERROR:
@@ -350,8 +353,6 @@ public class JobHistoryParser implements HistoryEventHandler {
     taskInfo.error = StringInterner.weakIntern(event.getError());
     taskInfo.failedDueToAttemptId = event.getFailedAttemptID();
     taskInfo.counters = event.getCounters();
-    info.errorInfo = "Task " + taskInfo.taskId +" failed " +
-    taskInfo.attemptsMap.size() + " times ";
   }
 
   private void handleTaskStartedEvent(TaskStartedEvent event) {
@@ -368,6 +369,7 @@ public class JobHistoryParser implements HistoryEventHandler {
     info.finishedMaps = event.getFinishedMaps();
     info.finishedReduces = event.getFinishedReduces();
     info.jobStatus = StringInterner.weakIntern(event.getStatus());
+    info.errorInfo = StringInterner.weakIntern(event.getDiagnostics());
   }
 
   private void handleJobFinishedEvent(JobFinishedEvent event) {
@@ -384,6 +386,10 @@ public class JobHistoryParser implements HistoryEventHandler {
 
   private void handleJobPriorityChangeEvent(JobPriorityChangeEvent event) {
     info.priority = event.getPriority();
+  }
+  
+  private void handleJobQueueChangeEvent(JobQueueChangeEvent event) {
+    info.jobQueueName = event.getJobQueueName();
   }
 
   private void handleJobInitedEvent(JobInitedEvent event) {

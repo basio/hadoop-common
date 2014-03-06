@@ -65,7 +65,7 @@ import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
 import org.apache.hadoop.http.HttpConfig;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
@@ -90,7 +90,7 @@ import com.google.common.collect.ImmutableList;
  * The Secondary NameNode is a daemon that periodically wakes
  * up (determined by the schedule specified in the configuration),
  * triggers a periodic checkpoint and then goes back to sleep.
- * The Secondary NameNode uses the ClientProtocol to talk to the
+ * The Secondary NameNode uses the NamenodeProtocol to talk to the
  * primary NameNode.
  *
  **********************************************************/
@@ -113,7 +113,7 @@ public class SecondaryNameNode implements Runnable {
   private Configuration conf;
   private InetSocketAddress nameNodeAddr;
   private volatile boolean shouldRun;
-  private HttpServer infoServer;
+  private HttpServer2 infoServer;
   private URL imageListenURL;
 
   private Collection<URI> checkpointDirs;
@@ -257,7 +257,7 @@ public class SecondaryNameNode implements Runnable {
         DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTPS_ADDRESS_DEFAULT);
     InetSocketAddress httpsAddr = NetUtils.createSocketAddr(httpsAddrString);
 
-    HttpServer.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
+    HttpServer2.Builder builder = DFSUtil.httpServerTemplateForNNAndJN(conf,
         httpAddr, httpsAddr, "secondary",
         DFSConfigKeys.DFS_SECONDARY_NAMENODE_INTERNAL_SPNEGO_USER_NAME_KEY,
         DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY);
@@ -445,8 +445,9 @@ public class SecondaryNameNode implements Runnable {
             } else {
               LOG.info("Image has changed. Downloading updated image from NN.");
               MD5Hash downloadedHash = TransferFsImage.downloadImageToStorage(
-                  nnHostPort, sig.mostRecentCheckpointTxId, dstImage.getStorage(), true);
-              dstImage.saveDigestAndRenameCheckpointImage(
+                  nnHostPort, sig.mostRecentCheckpointTxId,
+                  dstImage.getStorage(), true);
+              dstImage.saveDigestAndRenameCheckpointImage(NameNodeFile.IMAGE,
                   sig.mostRecentCheckpointTxId, downloadedHash);
             }
         
@@ -511,8 +512,10 @@ public class SecondaryNameNode implements Runnable {
     boolean loadImage = false;
     boolean isFreshCheckpointer = (checkpointImage.getNamespaceID() == 0);
     boolean isSameCluster =
-        (dstStorage.versionSupportsFederation() && sig.isSameCluster(checkpointImage)) ||
-        (!dstStorage.versionSupportsFederation() && sig.namespaceIdMatches(checkpointImage));
+        (dstStorage.versionSupportsFederation(NameNodeLayoutVersion.FEATURES)
+            && sig.isSameCluster(checkpointImage)) ||
+        (!dstStorage.versionSupportsFederation(NameNodeLayoutVersion.FEATURES)
+            && sig.namespaceIdMatches(checkpointImage));
     if (isFreshCheckpointer ||
         (isSameCluster &&
          !sig.storageVersionMatches(checkpointImage.getStorage()))) {
@@ -553,7 +556,7 @@ public class SecondaryNameNode implements Runnable {
     //
     long txid = checkpointImage.getLastAppliedTxId();
     TransferFsImage.uploadImageFromStorage(fsName, getImageListenAddress(),
-        dstStorage, txid);
+        dstStorage, NameNodeFile.IMAGE, txid);
 
     // error simulation code for junit test
     CheckpointFaultInjector.getInstance().afterSecondaryUploadsNewImage();
@@ -995,13 +998,19 @@ public class SecondaryNameNode implements Runnable {
     
     dstStorage.setStorageInfo(sig);
     if (loadImage) {
-      File file = dstStorage.findImageFile(sig.mostRecentCheckpointTxId);
+      File file = dstStorage.findImageFile(NameNodeFile.IMAGE,
+          sig.mostRecentCheckpointTxId);
       if (file == null) {
         throw new IOException("Couldn't find image file at txid " + 
             sig.mostRecentCheckpointTxId + " even though it should have " +
             "just been downloaded");
       }
-      dstImage.reloadFromImageFile(file, dstNamesystem);
+      dstNamesystem.writeLock();
+      try {
+        dstImage.reloadFromImageFile(file, dstNamesystem);
+      } finally {
+        dstNamesystem.writeUnlock();
+      }
       dstNamesystem.dir.imageLoadComplete();
     }
     // error simulation code for junit test

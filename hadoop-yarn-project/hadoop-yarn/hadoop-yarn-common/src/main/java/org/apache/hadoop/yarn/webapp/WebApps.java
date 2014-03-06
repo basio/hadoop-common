@@ -35,9 +35,13 @@ import javax.servlet.http.HttpServlet;
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpConfig.Policy;
+import org.apache.hadoop.http.HttpConfig;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.security.AdminACLsManager;
+import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -84,6 +88,7 @@ public class WebApps {
     int port = 0;
     boolean findPort = false;
     Configuration conf;
+    Policy httpPolicy = null;
     boolean devMode = false;
     private String spnegoPrincipalKey;
     private String spnegoKeytabKey;
@@ -140,7 +145,13 @@ public class WebApps {
       this.conf = conf;
       return this;
     }
-    
+
+    public Builder<T> withHttpPolicy(Configuration conf, Policy httpPolicy) {
+      this.conf = conf;
+      this.httpPolicy = httpPolicy;
+      return this;
+    }
+
     public Builder<T> withHttpSpnegoPrincipalKey(String spnegoPrincipalKey) {
       this.spnegoPrincipalKey = spnegoPrincipalKey;
       return this;
@@ -216,20 +227,37 @@ public class WebApps {
             System.exit(1);
           }
         }
-        HttpServer.Builder builder = new HttpServer.Builder().setName(name)
-            .addEndpoint(URI.create("http://" + bindAddress + ":" + port))
-            .setConf(conf).setFindPort(findPort)
+        String httpScheme;
+        if (this.httpPolicy == null) {
+          httpScheme = WebAppUtils.getHttpSchemePrefix(conf);
+        } else {
+          httpScheme =
+              (httpPolicy == Policy.HTTPS_ONLY) ? WebAppUtils.HTTPS_PREFIX
+                  : WebAppUtils.HTTP_PREFIX;
+        }
+        HttpServer2.Builder builder = new HttpServer2.Builder()
+            .setName(name)
+            .addEndpoint(
+                URI.create(httpScheme + bindAddress
+                    + ":" + port)).setConf(conf).setFindPort(findPort)
             .setACL(new AdminACLsManager(conf).getAdminAcl())
             .setPathSpec(pathList.toArray(new String[0]));
 
         boolean hasSpnegoConf = spnegoPrincipalKey != null
-            && spnegoKeytabKey != null;
+            && conf.get(spnegoPrincipalKey) != null && spnegoKeytabKey != null
+            && conf.get(spnegoKeytabKey) != null;
+
         if (hasSpnegoConf) {
           builder.setUsernameConfKey(spnegoPrincipalKey)
               .setKeytabConfKey(spnegoKeytabKey)
               .setSecurityEnabled(UserGroupInformation.isSecurityEnabled());
         }
-        HttpServer server = builder.build();
+
+        if (httpScheme.equals(WebAppUtils.HTTPS_PREFIX)) {
+          WebAppUtils.loadSslConfiguration(builder);
+        }
+
+        HttpServer2 server = builder.build();
 
         for(ServletStruct struct: servlets) {
           server.addServlet(struct.name, struct.spec, struct.clazz);
@@ -237,7 +265,7 @@ public class WebApps {
         for(Map.Entry<String, Object> entry : attributes.entrySet()) {
           server.setAttribute(entry.getKey(), entry.getValue());
         }
-        HttpServer.defineFilter(server.getWebAppContext(), "guice",
+        HttpServer2.defineFilter(server.getWebAppContext(), "guice",
           GuiceFilter.class.getName(), null, new String[] { "/*" });
 
         webapp.setConf(conf);
