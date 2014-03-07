@@ -392,6 +392,8 @@ BREAKDOWN OF HDFS-5535 ROLLING UPGRADE SUBTASKS AND RELATED JIRAS
     HDFS-6041. Downgrade/Finalize should rename the rollback image instead of
     purging it. (jing9)
 
+    HDFS-6060. NameNode should not check DataNode layout version (brandonli)
+
 Release 2.5.0 - UNRELEASED
 
   INCOMPATIBLE CHANGES
@@ -529,6 +531,9 @@ Release 2.4.0 - UNRELEASED
 
     HDFS-6061. Allow dfs.datanode.shared.file.descriptor.path to contain
     multiple entries and fall back when needed (cmccabe)
+
+    HDFS-5986. Capture the number of blocks pending deletion on namenode webUI.
+    (cnauroth)
 
   OPTIMIZATIONS
 
@@ -698,6 +703,20 @@ Release 2.4.0 - UNRELEASED
     HDFS-6058. Fix TestHDFSCLI failures after HADOOP-8691 change.
     (Akira Ajisaka via wheat9)
 
+    HDFS-6062. TestRetryCacheWithHA#testConcat is flaky. (Jing Zhao via wheat9)
+
+    HDFS-6059. TestBlockReaderLocal fails if native library is not available.
+    (Akira AJISAKA via Colin Patrick McCabe)
+
+    HDFS-6084. DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_DEFAULT is
+    not updated with latest block report interval of 6 hrs.
+    (Vinayakumar B via wheat9)
+
+    HDFS-6067. TestPread.testMaxOutHedgedReadPool is flaky (cmccabe)
+
+    HDFS-6065. HDFS zero-copy reads should return null on EOF when doing ZCR
+    (cmccabe)
+
   BREAKDOWN OF HDFS-5698 SUBTASKS AND RELATED JIRAS
 
     HDFS-5717. Save FSImage header in protobuf. (Haohui Mai via jing9)
@@ -846,6 +865,11 @@ Release 2.4.0 - UNRELEASED
 
     HDFS-6039. Uploading a File under a Dir with default acls throws "Duplicated
     ACLFeature". (cnauroth)
+
+    HDFS-6063. TestAclCLI fails intermittently when running test 24:
+    copyFromLocal. (cnauroth)
+
+    HDFS-6069. Quash stack traces when ACLs are disabled. (cnauroth)
 
 Release 2.3.1 - UNRELEASED
 
